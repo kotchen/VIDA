@@ -6,7 +6,7 @@
 
 **Architecture:** Keep the existing `Transcriber` interface and task pipeline, but make `_load_model` asynchronous and construct `WhisperModel` through `asyncio.to_thread`. Recover the environment separately by replacing only the incomplete model cache, downloading through the user's temporary local proxy with Xet disabled, and restarting the existing port 8001 service.
 
-**Tech Stack:** Python 3.11, asyncio, pytest, faster-whisper, huggingface-hub, FastAPI/Uvicorn, PowerShell.
+**Tech Stack:** Python 3.11, asyncio, unittest, faster-whisper, huggingface-hub, FastAPI/Uvicorn, PowerShell.
 
 ## Global Constraints
 
@@ -33,52 +33,56 @@
 import asyncio
 import importlib
 import sys
+import tempfile
 import threading
 import time
 import types
+import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 
-def _load_transcriber_module(monkeypatch):
-    fake_faster_whisper = types.ModuleType("faster_whisper")
-    fake_faster_whisper.WhisperModel = object
-    monkeypatch.setitem(sys.modules, "faster_whisper", fake_faster_whisper)
-    sys.modules.pop("backend.transcriber", None)
-    return importlib.import_module("backend.transcriber")
+class TranscriberAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_model_initialization_does_not_block_event_loop(self):
+        fake_faster_whisper = types.ModuleType("faster_whisper")
+        fake_faster_whisper.WhisperModel = object
+        with patch.dict(sys.modules, {"faster_whisper": fake_faster_whisper}):
+            sys.modules.pop("backend.transcriber", None)
+            module = importlib.import_module("backend.transcriber")
 
+        constructor_started = threading.Event()
+        release_constructor = threading.Event()
 
-def test_model_initialization_does_not_block_event_loop(monkeypatch, tmp_path):
-    module = _load_transcriber_module(monkeypatch)
-    constructor_started = threading.Event()
-    release_constructor = threading.Event()
+        class SlowModel:
+            def __init__(self, *args, **kwargs):
+                constructor_started.set()
+                release_constructor.wait(timeout=1)
 
-    class SlowModel:
-        def __init__(self, *args, **kwargs):
-            constructor_started.set()
-            release_constructor.wait(timeout=1)
+            def transcribe(self, *args, **kwargs):
+                info = types.SimpleNamespace(language="en", language_probability=1.0)
+                return [], info
 
-        def transcribe(self, *args, **kwargs):
-            info = types.SimpleNamespace(language="en", language_probability=1.0)
-            return [], info
+        module.WhisperModel = SlowModel
+        transcriber = module.Transcriber()
 
-    monkeypatch.setattr(module, "WhisperModel", SlowModel)
-    audio = tmp_path / "audio.m4a"
-    audio.write_bytes(b"audio")
-    transcriber = module.Transcriber()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio = Path(temp_dir) / "audio.m4a"
+            audio.write_bytes(b"audio")
+            started_at = time.monotonic()
+            task = asyncio.create_task(transcriber.transcribe(str(audio)))
+            started = await asyncio.wait_for(
+                asyncio.to_thread(constructor_started.wait), timeout=1.5
+            )
+            self.assertTrue(started)
+            release_constructor.set()
+            await asyncio.wait_for(task, timeout=0.5)
 
-    async def scenario():
-        started_at = time.monotonic()
-        task = asyncio.create_task(transcriber.transcribe(str(audio)))
-        await asyncio.wait_for(asyncio.to_thread(constructor_started.wait), timeout=0.2)
-        release_constructor.set()
-        await asyncio.wait_for(task, timeout=0.5)
-        return time.monotonic() - started_at
-
-    assert asyncio.run(scenario()) < 0.5
+        self.assertLess(time.monotonic() - started_at, 0.5)
 ```
 
 - [ ] **Step 2: Run the focused test and verify RED**
 
-Run: `\.venv\Scripts\python.exe -m pytest tests/test_transcriber.py -v`
+Run: `\.venv\Scripts\python.exe -m unittest tests.test_transcriber -v`
 
 Expected: FAIL because the synchronous constructor blocks the event loop until the one-second timeout, so the measured duration exceeds 0.5 seconds.
 
@@ -111,11 +115,11 @@ await self._load_model()
 
 - [ ] **Step 4: Run focused and full tests**
 
-Run: `\.venv\Scripts\python.exe -m pytest tests/test_transcriber.py -v`
+Run: `\.venv\Scripts\python.exe -m unittest tests.test_transcriber -v`
 
 Expected: PASS.
 
-Run: `\.venv\Scripts\python.exe -m pytest -v`
+Run: `\.venv\Scripts\python.exe -m unittest discover -v`
 
 Expected: all tests PASS.
 
