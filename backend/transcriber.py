@@ -18,11 +18,18 @@ class Transcriber:
         """
         self.model_size = model_size
         self.model = None
+        self._model_lock = asyncio.Lock()
         self.last_detected_language = None
         
     async def _load_model(self):
         """延迟加载模型"""
-        if self.model is None:
+        if self.model is not None:
+            return
+
+        async with self._model_lock:
+            if self.model is not None:
+                return
+
             logger.info(f"正在加载Whisper模型: {self.model_size}")
             try:
                 self.model = await asyncio.to_thread(
