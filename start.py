@@ -6,7 +6,63 @@ AI视频转录器启动脚本
 import os
 import sys
 import subprocess
+import argparse
+from dataclasses import dataclass
 from pathlib import Path
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
+
+@dataclass(frozen=True)
+class StartupOptions:
+    production_mode: bool
+    port: int
+
+
+def parse_startup_options(argv=None, environ=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    if environ is None:
+        environ = os.environ
+
+    parser = argparse.ArgumentParser(description="Start AI Video Transcriber")
+    parser.add_argument("--prod", action="store_true", help="Disable hot reload")
+    parser.add_argument("--port", type=int, help="Server port")
+    args = parser.parse_args(argv)
+
+    return StartupOptions(
+        production_mode=args.prod or environ.get("PRODUCTION_MODE") == "true",
+        port=args.port if args.port is not None else int(environ.get("PORT", 8000)),
+    )
+
+
+def configure_ffmpeg_path(environ=None, project_root=None):
+    if environ is None:
+        environ = os.environ
+    if project_root is None:
+        project_root = Path(__file__).parent
+
+    explicit_location = environ.get("FFMPEG_LOCATION")
+    candidates = []
+    if explicit_location:
+        explicit_path = Path(explicit_location)
+        candidates.append(explicit_path.parent if explicit_path.is_file() else explicit_path)
+    candidates.append(Path(project_root) / "tools" / "ffmpeg" / "bin")
+
+    for candidate in candidates:
+        if (candidate / "ffmpeg.exe").exists() and (candidate / "ffprobe.exe").exists():
+            current_path = environ.get("PATH", "")
+            path_parts = [part for part in current_path.split(os.pathsep) if part]
+            candidate_text = str(candidate)
+            if candidate_text not in path_parts:
+                environ["PATH"] = os.pathsep.join([candidate_text] + path_parts)
+            environ["FFMPEG_LOCATION"] = candidate_text
+            return candidate
+
+    return None
 
 def check_dependencies():
     """检查依赖是否安装"""
@@ -78,7 +134,9 @@ def setup_environment():
 def main():
     """主函数"""
     # 检查是否使用生产模式（禁用热重载）
-    production_mode = "--prod" in sys.argv or os.getenv("PRODUCTION_MODE") == "true"
+    options = parse_startup_options()
+    production_mode = options.production_mode
+    configure_ffmpeg_path()
     
     print("🚀 AI视频转录器启动检查")
     if production_mode:
@@ -103,7 +161,7 @@ def main():
     
     # 启动服务器
     host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", 8000))
+    port = options.port
     
     print(f"\n🌐 启动服务器...")
     print(f"   地址: http://localhost:{port}")
@@ -125,7 +183,7 @@ def main():
         if not production_mode:
             cmd.append("--reload")
         
-        subprocess.run(cmd)
+        subprocess.run(cmd, env=os.environ.copy())
         
     except KeyboardInterrupt:
         print("\n\n👋 服务已停止")

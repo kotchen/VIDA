@@ -103,6 +103,8 @@ python3 start.py
 
 After the service starts, open your browser and visit `http://localhost:8000`
 
+Use `--port` to choose another port, for example `python3 start.py --port 8001`.
+
 #### Production Mode (Recommended for long videos)
 
 To avoid SSE disconnections during long processing, start in production mode (hot-reload disabled):

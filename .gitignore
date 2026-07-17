@@ -25,6 +25,7 @@ MANIFEST
 venv/
 env/
 ENV/
+.venv/
 
 # IDE
 .vscode/
@@ -41,6 +42,7 @@ Thumbs.db
 
 # Temporary files
 temp/
+tools/ffmpeg/
 *.tmp
 *.temp
 
@@ -65,3 +67,6 @@ temp/
 # Model cache
 models/
 .cache/
+
+#SuperPowers
+.superpowers/brainstorm

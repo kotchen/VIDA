@@ -15,6 +15,7 @@ class VideoProcessor:
     """视频处理器，使用yt-dlp下载和转换视频"""
     
     def __init__(self):
+        ffmpeg_dir = self._find_ffmpeg_dir()
         self.ydl_opts = {
             'format': 'bestaudio/best',  # 优先下载最佳音频源
             'outtmpl': '%(title)s.%(ext)s',
@@ -31,6 +32,26 @@ class VideoProcessor:
             'no_warnings': True,
             'noplaylist': True,  # 强制只下载单个视频，不下载播放列表
         }
+        if ffmpeg_dir:
+            self.ydl_opts['ffmpeg_location'] = ffmpeg_dir
+
+    @staticmethod
+    def _find_ffmpeg_dir() -> Optional[str]:
+        explicit = os.environ.get("FFMPEG_LOCATION")
+        if explicit:
+            p = Path(explicit)
+            if p.is_file():
+                p = p.parent
+            if (p / "ffmpeg.exe").exists() and (p / "ffprobe.exe").exists():
+                return str(p)
+            if (p / "ffmpeg").exists() and (p / "ffprobe").exists():
+                return str(p)
+        candidate = Path(__file__).parent.parent / "tools" / "ffmpeg" / "bin"
+        if (candidate / "ffmpeg.exe").exists() and (candidate / "ffprobe.exe").exists():
+            return str(candidate)
+        if (candidate / "ffmpeg").exists() and (candidate / "ffprobe").exists():
+            return str(candidate)
+        return None
 
     async def normalize_local_media_to_m4a(self, input_path: Path, output_dir: Path) -> str:
         """

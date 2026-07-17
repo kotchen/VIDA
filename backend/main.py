@@ -17,6 +17,7 @@ from video_processor import VideoProcessor
 from transcriber import Transcriber
 from summarizer import Summarizer
 from translator import Translator
+from model_settings import validate_temperature
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -109,6 +110,29 @@ UPLOAD_ALLOWED_EXT = frozenset({".txt", ".mp3", ".mp4", ".m4a", ".wav", ".webm",
 UPLOAD_MAX_MB = int(os.getenv("UPLOAD_MAX_MB", "200"))
 
 
+def _temperature_or_400(value) -> float:
+    try:
+        return validate_temperature(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _create_request_ai_services(
+    api_key: str = "",
+    model_base_url: str = "",
+    model_id: str = "",
+    temperature: float = 0.1,
+):
+    validated_temperature = validate_temperature(temperature)
+    kwargs = {
+        "api_key": (api_key or "").strip() or None,
+        "base_url": (model_base_url or "").strip().rstrip("/") or None,
+        "model": (model_id or "").strip() or None,
+        "temperature": validated_temperature,
+    }
+    return Summarizer(**kwargs), Translator(**kwargs)
+
+
 def _sanitize_title_for_filename(title: str) -> str:
     """将视频标题清洗为安全的文件名片段。"""
     if not title:
@@ -119,6 +143,23 @@ def _sanitize_title_for_filename(title: str) -> str:
     safe = re.sub(r"\s+", "_", safe).strip("._-")
     # 最长限制，避免过长文件名问题
     return safe[:80] or "untitled"
+
+
+def _sanitize_model_for_filename(model_id: str) -> str:
+    """将模型名清洗为安全的文件名片段（如 openai/gpt-4o → gpt-4o）。"""
+    if not model_id:
+        return "default"
+    # 去掉供应商前缀，只保留最后一段
+    tail = str(model_id).strip().split("/")[-1]
+    safe = re.sub(r"[^\w\-\.]", "", tail).strip("._-")
+    return safe[:40] or "default"
+
+
+def _output_dir_for_task(safe_title: str, short_id: str) -> Path:
+    """按标题+任务短ID创建输出目录并返回路径。"""
+    out_dir = TEMP_DIR / f"{safe_title}_{short_id}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
 
 
 def _txt_to_raw_transcript_markdown(body: str) -> str:
@@ -143,21 +184,26 @@ async def _run_post_extract_pipeline(
     source_ref: str,
     summary_language: str,
     request_summarizer: Summarizer,
+    request_translator: Translator,
     dedup_url: Optional[str] = None,
-    api_key: str = "",
-    model_base_url: str = "",
     model_id: str = "",
 ) -> None:
     """取得 raw_script 后的共用管线：归档、优化、翻译、摘要、广播。"""
     short_id = task_id.replace("-", "")[:6]
     safe_title = _sanitize_title_for_filename(video_title)
+    model_slug = _sanitize_model_for_filename(model_id)
+    out_dir = _output_dir_for_task(safe_title, short_id)
+    folder_name = out_dir.name
 
     try:
-        raw_md_filename = f"raw_{safe_title}_{short_id}.md"
-        raw_md_path = TEMP_DIR / raw_md_filename
+        raw_md_filename = f"raw_{model_slug}.md"
+        raw_md_path = out_dir / raw_md_filename
         with open(raw_md_path, "w", encoding="utf-8") as f:
             f.write((raw_script or "") + f"\n\nsource: {source_ref}\n")
-        tasks[task_id].update({"raw_script_file": raw_md_filename})
+        tasks[task_id].update({
+            "raw_script_file": f"{folder_name}/{raw_md_filename}",
+            "raw_filename": raw_md_filename,
+        })
         save_tasks(tasks)
         await broadcast_task_update(task_id, tasks[task_id])
     except Exception as e:
@@ -177,8 +223,8 @@ async def _run_post_extract_pipeline(
     detected_language = transcriber.get_detected_language(raw_script)
     detected_language = (detected_language or "").strip()
     if not detected_language:
-        detected_language = translator.infer_language_code(raw_script)
-    detected_language = translator.normalize_lang_code(detected_language) or detected_language
+        detected_language = request_translator.infer_language_code(raw_script)
+    detected_language = request_translator.normalize_lang_code(detected_language) or detected_language
 
     logger.info(f"检测到的语言: {detected_language}, 摘要语言: {summary_language}")
 
@@ -186,18 +232,7 @@ async def _run_post_extract_pipeline(
     translation_filename = None
     translation_path = None
 
-    eff_key = (api_key or "").strip()
-    eff_base = (model_base_url or "").strip().rstrip("/")
-    if eff_key:
-        request_translator = Translator(
-            api_key=eff_key,
-            base_url=eff_base or None,
-            model=model_id or None,
-        )
-    else:
-        request_translator = translator
-
-    need_translation = translator.languages_differ_for_translation(
+    need_translation = request_translator.languages_differ_for_translation(
         detected_language, summary_language
     )
 
@@ -214,8 +249,8 @@ async def _run_post_extract_pipeline(
             script, summary_language, detected_language
         )
         translation_with_title = f"# {video_title}\n\n{translation_content}\n\nsource: {source_ref}\n"
-        translation_filename = f"translation_{safe_title}_{short_id}.md"
-        translation_path = TEMP_DIR / translation_filename
+        translation_filename = f"translation_{model_slug}.md"
+        translation_path = out_dir / translation_filename
         async with aiofiles.open(translation_path, "w", encoding="utf-8") as f:
             await f.write(translation_with_title)
     else:
@@ -234,22 +269,13 @@ async def _run_post_extract_pipeline(
     summary = await request_summarizer.summarize(script, summary_language, video_title)
     summary_with_source = summary + f"\n\nsource: {source_ref}\n"
 
-    script_filename = f"transcript_{task_id}.md"
-    script_path = TEMP_DIR / script_filename
+    script_filename = f"transcript_{model_slug}.md"
+    script_path = out_dir / script_filename
     async with aiofiles.open(script_path, "w", encoding="utf-8") as f:
         await f.write(script_with_title)
 
-    new_script_filename = f"transcript_{safe_title}_{short_id}.md"
-    new_script_path = TEMP_DIR / new_script_filename
-    try:
-        if script_path.exists():
-            script_path.rename(new_script_path)
-            script_path = new_script_path
-    except Exception:
-        pass
-
-    summary_filename = f"summary_{safe_title}_{short_id}.md"
-    summary_path = TEMP_DIR / summary_filename
+    summary_filename = f"summary_{model_slug}.md"
+    summary_path = out_dir / summary_filename
     async with aiofiles.open(summary_path, "w", encoding="utf-8") as f:
         await f.write(summary_with_source)
 
@@ -262,6 +288,11 @@ async def _run_post_extract_pipeline(
         "summary": summary_with_source,
         "script_path": str(script_path),
         "summary_path": str(summary_path),
+        "script_filename": script_filename,
+        "summary_filename": summary_filename,
+        "output_folder": folder_name,
+        "model_id": model_id or "",
+        "model_slug": model_slug,
         "short_id": short_id,
         "safe_title": safe_title,
         "detected_language": detected_language,
@@ -321,6 +352,7 @@ async def _enqueue_upload_job(
     api_key: str,
     model_base_url: str,
     model_id: str,
+    temperature: float,
 ) -> dict:
     """保存上传文件并入队 process_upload_task，返回 {task_id, message}。"""
     raw_name = file.filename or "upload.bin"
@@ -389,6 +421,7 @@ async def _enqueue_upload_job(
             api_key,
             model_base_url,
             model_id,
+            temperature,
         )
     )
     active_tasks[task_id] = bg
@@ -403,6 +436,7 @@ async def process_video(
     api_key: str = Form(default=""),
     model_base_url: str = Form(default=""),
     model_id: str = Form(default=""),
+    temperature: str = Form(default="0.1"),
     file: Optional[UploadFile] = File(None),
 ):
     """
@@ -410,9 +444,15 @@ async def process_video(
     上传与 URL 共用此路径，便于反向代理只放行 /api/process-video 的环境。
     """
     try:
+        validated_temperature = _temperature_or_400(temperature)
         if file is not None and (file.filename or "").strip():
             return await _enqueue_upload_job(
-                file, summary_language, api_key, model_base_url, model_id
+                file,
+                summary_language,
+                api_key,
+                model_base_url,
+                model_id,
+                validated_temperature,
             )
 
         stripped = (url or "").strip()
@@ -450,7 +490,17 @@ async def process_video(
         save_tasks(tasks)
         
         # 创建并跟踪异步任务
-        task = asyncio.create_task(process_video_task(task_id, url, summary_language, api_key, model_base_url, model_id))
+        task = asyncio.create_task(
+            process_video_task(
+                task_id,
+                url,
+                summary_language,
+                api_key,
+                model_base_url,
+                model_id,
+                validated_temperature,
+            )
+        )
         active_tasks[task_id] = task
         
         return {"task_id": task_id, "message": "任务已创建，正在处理中..."}
@@ -468,6 +518,7 @@ async def process_video_task(
     api_key: str = "",
     model_base_url: str = "",
     model_id: str = "",
+    temperature: float = 0.1,
 ):
     """
     异步处理视频任务
@@ -483,17 +534,18 @@ async def process_video_task(
         await broadcast_task_update(task_id, tasks[task_id])
         await asyncio.sleep(0.1)
 
-        # 如果前端传入了 API 凭据，创建专用 Summarizer（线程安全，覆盖全局实例）
-        if api_key:
-            effective_url = model_base_url.rstrip("/") or None
-            request_summarizer = Summarizer(
-                api_key=api_key,
-                base_url=effective_url,
-                model=model_id or None,
-            )
-            logger.info(f"使用前端提供的 API Key，base_url={effective_url}, model={model_id or 'default'}")
-        else:
-            request_summarizer = summarizer  # 全局实例（使用环境变量）
+        request_summarizer, request_translator = _create_request_ai_services(
+            api_key,
+            model_base_url,
+            model_id,
+            temperature,
+        )
+        logger.info(
+            "Created request-scoped AI services: base_url=%s, model=%s, temperature=%s",
+            model_base_url.rstrip("/") or "environment default",
+            model_id or "default",
+            temperature,
+        )
 
         subtitle_text, sub_title, sub_lang = await video_processor.fetch_subtitles(url, TEMP_DIR)
 
@@ -546,9 +598,8 @@ async def process_video_task(
             source_ref=url,
             summary_language=summary_language,
             request_summarizer=request_summarizer,
+            request_translator=request_translator,
             dedup_url=url,
-            api_key=api_key,
-            model_base_url=model_base_url,
             model_id=model_id,
         )
 
@@ -579,10 +630,16 @@ async def process_upload(
     api_key: str = Form(default=""),
     model_base_url: str = Form(default=""),
     model_id: str = Form(default=""),
+    temperature: str = Form(default="0.1"),
 ):
     """独立上传入口；逻辑与 multipart 带 file 的 /api/process-video 相同。"""
     return await _enqueue_upload_job(
-        file, summary_language, api_key, model_base_url, model_id
+        file,
+        summary_language,
+        api_key,
+        model_base_url,
+        model_id,
+        _temperature_or_400(temperature),
     )
 
 
@@ -596,21 +653,22 @@ async def process_upload_task(
     api_key: str = "",
     model_base_url: str = "",
     model_id: str = "",
+    temperature: float = 0.1,
 ):
     source_ref = f"upload:{original_name}"
     try:
-        if api_key:
-            effective_url = model_base_url.rstrip("/") or None
-            request_summarizer = Summarizer(
-                api_key=api_key,
-                base_url=effective_url,
-                model=model_id or None,
-            )
-            logger.info(
-                f"上传任务使用前端 API Key，base_url={effective_url}, model={model_id or 'default'}"
-            )
-        else:
-            request_summarizer = summarizer
+        request_summarizer, request_translator = _create_request_ai_services(
+            api_key,
+            model_base_url,
+            model_id,
+            temperature,
+        )
+        logger.info(
+            "Created upload AI services: base_url=%s, model=%s, temperature=%s",
+            model_base_url.rstrip("/") or "environment default",
+            model_id or "default",
+            temperature,
+        )
 
         if ext_lower == ".txt":
             tasks[task_id].update({
@@ -658,9 +716,8 @@ async def process_upload_task(
             source_ref=source_ref,
             summary_language=summary_language,
             request_summarizer=request_summarizer,
+            request_translator=request_translator,
             dedup_url=None,
-            api_key=api_key,
-            model_base_url=model_base_url,
             model_id=model_id,
         )
 
@@ -776,6 +833,164 @@ async def download_file(filename: str):
     except Exception as e:
         logger.error(f"下载文件失败: {e}")
         raise HTTPException(status_code=500, detail=f"下载失败: {str(e)}")
+
+
+@app.get("/api/download/{folder}/{filename}")
+async def download_file_in_folder(folder: str, filename: str):
+    """从按标题分组的子目录下载文件"""
+    try:
+        if not filename.endswith('.md'):
+            raise HTTPException(status_code=400, detail="仅支持下载.md文件")
+        for part in (folder, filename):
+            if '..' in part or '/' in part or '\\' in part:
+                raise HTTPException(status_code=400, detail="文件名格式无效")
+
+        file_path = (TEMP_DIR / folder / filename).resolve()
+        if TEMP_DIR.resolve() not in file_path.parents:
+            raise HTTPException(status_code=400, detail="路径无效")
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="文件不存在")
+
+        return FileResponse(
+            file_path,
+            filename=f"{folder}_{filename}",
+            media_type="text/markdown"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"下载文件失败: {e}")
+        raise HTTPException(status_code=500, detail=f"下载失败: {str(e)}")
+
+
+# ── 生成文件库（Library）API ────────────────────────────────
+
+_FILE_KINDS = ("raw", "transcript", "translation", "summary")
+_ROOT_GROUP = "_root"
+
+
+def _parse_md_filename(name: str) -> dict:
+    """解析 {kind}_{model}.md 或旧版 {kind}_{title}_{id}.md 文件名。"""
+    stem = name[:-3] if name.endswith(".md") else name
+    parts = stem.split("_", 1)
+    kind = parts[0] if parts[0] in _FILE_KINDS else "other"
+    model = parts[1] if len(parts) > 1 and parts[0] in _FILE_KINDS else ""
+    return {"kind": kind, "model": model}
+
+
+def _group_display_title(folder_name: str) -> str:
+    """从 {safe_title}_{short_id} 目录名提取展示标题。"""
+    stem = re.sub(r"_[0-9a-f]{6}$", "", folder_name)
+    return stem.replace("_", " ").strip() or folder_name
+
+
+def _file_entry(path: Path, include_model: bool = True) -> dict:
+    stat = path.stat()
+    meta = _parse_md_filename(path.name)
+    return {
+        "name": path.name,
+        "kind": meta["kind"],
+        "model": meta["model"] if include_model else "",
+        "size": stat.st_size,
+        "mtime": stat.st_mtime,
+    }
+
+
+def _resolve_in_temp(folder: str, filename: Optional[str] = None) -> Path:
+    """安全解析 temp 内路径，阻止路径遍历。"""
+    for part in [p for p in (folder, filename) if p]:
+        if '..' in part or '/' in part or '\\' in part:
+            raise HTTPException(status_code=400, detail="路径格式无效")
+    base = TEMP_DIR.resolve()
+    target = (base / ("" if folder == _ROOT_GROUP else folder) / (filename or "")).resolve()
+    if target != base and base not in target.parents:
+        raise HTTPException(status_code=400, detail="路径无效")
+    return target
+
+
+@app.get("/api/files")
+async def list_generated_files():
+    """列出 temp 下所有生成的 Markdown 文件，按标题目录分组。"""
+    groups = []
+    try:
+        # 子目录分组（新版结构：{safe_title}_{short_id}/xxx.md）
+        for d in sorted(TEMP_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+            if not d.is_dir():
+                continue
+            md_files = sorted(d.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not md_files:
+                continue
+            groups.append({
+                "folder": d.name,
+                "title": _group_display_title(d.name),
+                "mtime": max(p.stat().st_mtime for p in md_files),
+                "files": [_file_entry(p) for p in md_files],
+            })
+
+        # 根目录遗留散文件（旧版结构，文件名不含模型信息）
+        root_files = sorted(TEMP_DIR.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if root_files:
+            groups.append({
+                "folder": _ROOT_GROUP,
+                "title": "",
+                "mtime": max(p.stat().st_mtime for p in root_files),
+                "files": [_file_entry(p, include_model=False) for p in root_files],
+            })
+    except Exception as e:
+        logger.error(f"列出文件失败: {e}")
+        raise HTTPException(status_code=500, detail=f"列出文件失败: {str(e)}")
+
+    return {"groups": groups}
+
+
+@app.get("/api/files/{folder}/{filename}")
+async def read_generated_file(folder: str, filename: str):
+    """读取单个生成文件的内容用于预览。"""
+    if not filename.endswith('.md'):
+        raise HTTPException(status_code=400, detail="仅支持预览.md文件")
+    file_path = _resolve_in_temp(folder, filename)
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if file_path.stat().st_size > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="文件过大，无法预览")
+    content = file_path.read_text(encoding="utf-8", errors="replace")
+    entry = _file_entry(file_path)
+    entry["content"] = content
+    return entry
+
+
+@app.delete("/api/files/{folder}/{filename}")
+async def delete_generated_file(folder: str, filename: str):
+    """删除单个生成文件；目录清空后顺带删除目录。"""
+    file_path = _resolve_in_temp(folder, filename)
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    try:
+        file_path.unlink()
+        parent = file_path.parent
+        if parent != TEMP_DIR.resolve() and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+        return {"message": "文件已删除"}
+    except Exception as e:
+        logger.error(f"删除文件失败: {e}")
+        raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
+
+
+@app.delete("/api/files/{folder}")
+async def delete_generated_folder(folder: str):
+    """删除整个分组目录及其中的 Markdown 文件。"""
+    if folder == _ROOT_GROUP:
+        raise HTTPException(status_code=400, detail="根目录分组不支持整体删除")
+    dir_path = _resolve_in_temp(folder)
+    if not dir_path.is_dir():
+        raise HTTPException(status_code=404, detail="目录不存在")
+    try:
+        import shutil
+        shutil.rmtree(dir_path)
+        return {"message": "目录已删除"}
+    except Exception as e:
+        logger.error(f"删除目录失败: {e}")
+        raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
 
 
 @app.delete("/api/task/{task_id}")

@@ -29,6 +29,11 @@ class VideoTranscriber {
         fetch_models:            'Fetch',
         model_select:            'Model',
         model_default:           '— use server default —',
+        provider_profile:        'Provider profile',
+        profile_name:            'Profile name',
+        temperature:             'Temperature',
+        profile_saved:           'Profile saved',
+        profile_delete_confirm:  'Delete this provider profile?',
         summary_language:        'Summary Language',
         processing_progress:     'Processing',
         preparing:               'Preparing…',
@@ -65,6 +70,35 @@ class VideoTranscriber {
         error_upload_type:       'Unsupported file type',
         error_upload_empty:      'File is empty',
         error_upload_size:       (mb) => `File exceeds ${mb} MB limit`,
+        library_title:           'Generated Files',
+        library_empty:           'No generated files yet — run a transcription first.',
+        library_refresh:         'Refresh',
+        library_download:        'Download',
+        library_close:           'Close',
+        library_delete:          'Delete',
+        library_ungrouped:       'Ungrouped (legacy)',
+        library_files_count:     (n) => `${n} file${n > 1 ? 's' : ''}`,
+        confirm_delete_title:    'Confirm delete',
+        confirm_delete_group_msg: (title, n) => `Delete "${title}" and all ${n} file${n > 1 ? 's' : ''} in it? This cannot be undone.`,
+        confirm_delete_profile_msg: (name) => `Delete provider profile "${name}"? This cannot be undone.`,
+        confirm_delete_ok:       'Delete',
+        confirm_cancel:          'Cancel',
+        confirm_ok:              'OK',
+        kind_raw:                'Raw',
+        kind_transcript:         'Transcript',
+        kind_translation:        'Translation',
+        kind_summary:            'Summary',
+        kind_other:              'File',
+        stage_detect:            'Detect subtitles',
+        stage_subtitle:          'Fetch subtitles',
+        stage_download:          'Download audio',
+        stage_transcribe:        'Transcribe audio',
+        stage_optimize:          'Optimize text',
+        stage_translate:         'Translate text',
+        stage_summary:           'Generate summary',
+        fetching_subtitles:      'Fetching subtitles…',
+        generating_translation:  'Generating translation…',
+        dag_done:                'Done',
       },
       zh: {
         title:                   'AI 视频转录器',
@@ -79,6 +113,11 @@ class VideoTranscriber {
         fetch_models:            '获取',
         model_select:            '模型',
         model_default:           '— 使用服务器默认 —',
+        provider_profile:        '供应商配置',
+        profile_name:            '配置名称',
+        temperature:             'Temperature',
+        profile_saved:           '配置已保存',
+        profile_delete_confirm:  '确定删除当前供应商配置吗？',
         summary_language:        '摘要语言',
         processing_progress:     '处理进度',
         preparing:               '准备中…',
@@ -115,12 +154,42 @@ class VideoTranscriber {
         error_upload_type:       '不支持的文件类型',
         error_upload_empty:      '文件为空',
         error_upload_size:       (mb) => `文件超过 ${mb} MB 限制`,
+        library_title:           '生成文件',
+        library_empty:           '还没有生成文件 — 先运行一次转录吧。',
+        library_refresh:         '刷新',
+        library_download:        '下载',
+        library_close:           '关闭',
+        library_delete:          '删除',
+        library_ungrouped:       '未分组（旧版）',
+        library_files_count:     (n) => `${n} 个文件`,
+        confirm_delete_title:    '确认删除',
+        confirm_delete_group_msg: (title, n) => `将删除「${title}」及其中的 ${n} 个文件，此操作无法撤销。`,
+        confirm_delete_profile_msg: (name) => `将删除供应商配置「${name}」，此操作无法撤销。`,
+        confirm_delete_ok:       '删除',
+        confirm_cancel:          '取消',
+        confirm_ok:              '确定',
+        kind_raw:                '原始',
+        kind_transcript:         '转录',
+        kind_translation:        '翻译',
+        kind_summary:            '摘要',
+        kind_other:              '文件',
+        stage_detect:            '检测字幕',
+        stage_subtitle:          '获取字幕',
+        stage_download:          '下载音频',
+        stage_transcribe:        '转录音频',
+        stage_optimize:          '优化文本',
+        stage_translate:         '翻译文本',
+        stage_summary:           '生成摘要',
+        fetching_subtitles:      '正在获取字幕…',
+        generating_translation:  '正在生成翻译…',
+        dag_done:                '完成',
       }
     };
 
     this._initElements();
     this._bindEvents();
     this._loadSettings();
+    this._initLibrary();
     this._switchLang('en');
   }
 
@@ -139,7 +208,7 @@ class VideoTranscriber {
     this.modeBadge          = document.getElementById('modeBadge');
     this.progressStatus     = document.getElementById('progressStatus');
     this.progressFill       = document.getElementById('progressFill');
-    this.progressMessage    = document.getElementById('progressMessage');
+    this.dagList            = document.getElementById('dagList');
     this.resultsPanel       = document.getElementById('resultsPanel');
     this.scriptContent      = document.getElementById('scriptContent');
     this.summaryContent     = document.getElementById('summaryContent');
@@ -155,15 +224,42 @@ class VideoTranscriber {
     this.settingsBody       = document.getElementById('settingsBody');
     this.modelBaseUrl       = document.getElementById('modelBaseUrl');
     this.apiKeyInput        = document.getElementById('apiKeyInput');
+    this.providerProfileSelect = document.getElementById('providerProfileSelect');
+    this.addProfileBtn      = document.getElementById('addProfileBtn');
+    this.saveProfileBtn     = document.getElementById('saveProfileBtn');
+    this.deleteProfileBtn   = document.getElementById('deleteProfileBtn');
+    this.profileNameRow     = document.getElementById('profileNameRow');
+    this.profileNameInput   = document.getElementById('profileNameInput');
     this.fetchModelsBtn     = document.getElementById('fetchModelsBtn');
     this.fetchStatus        = document.getElementById('fetchStatus');
     this.modelSelect        = document.getElementById('modelSelect');
+    this.temperatureInput   = document.getElementById('temperatureInput');
     this.fetchIcon          = document.getElementById('fetchIcon');
     this.uploadZone         = document.getElementById('uploadZone');
     this.uploadPickBtn      = document.getElementById('uploadPickBtn');
     this.fileInput          = document.getElementById('fileInput');
     this.uploadMaxMb        = 200;
     this._allowedUploadExts = new Set(['.txt', '.mp3', '.mp4', '.m4a', '.wav', '.webm', '.mkv', '.ogg', '.flac']);
+    // library
+    this.libraryCard        = document.getElementById('libraryCard');
+    this.libraryHeader      = document.getElementById('libraryHeader');
+    this.libraryGroupsEl    = document.getElementById('libraryGroups');
+    this.libraryEmpty       = document.getElementById('libraryEmpty');
+    this.libraryCount       = document.getElementById('libraryCount');
+    this.libraryRefreshBtn  = document.getElementById('libraryRefreshBtn');
+    this.libModalBackdrop   = document.getElementById('libModalBackdrop');
+    this.libModalBadge      = document.getElementById('libModalBadge');
+    this.libModalTitle      = document.getElementById('libModalTitle');
+    this.libModalBody       = document.getElementById('libModalBody');
+    this.libModalDownload   = document.getElementById('libModalDownload');
+    this.libModalClose      = document.getElementById('libModalClose');
+    this.confirmBackdrop    = document.getElementById('confirmBackdrop');
+    this.confirmTitle       = document.getElementById('confirmTitle');
+    this.confirmMsg         = document.getElementById('confirmMsg');
+    this.confirmOk          = document.getElementById('confirmOk');
+    this.confirmCancel      = document.getElementById('confirmCancel');
+    this._libOpenGroups     = new Set();
+    this._libModalFile      = null;
   }
 
   /* ── Events ───────────────────────────────────────────── */
@@ -182,6 +278,13 @@ class VideoTranscriber {
 
     // Fetch models
     this.fetchModelsBtn.addEventListener('click', () => this._fetchModels());
+    this.addProfileBtn.addEventListener('click', () => this._beginAddProfile());
+    this.saveProfileBtn.addEventListener('click', () => this._saveActiveProfile());
+    this.deleteProfileBtn.addEventListener('click', () => this._deleteActiveProfile());
+    this.providerProfileSelect.addEventListener('change', () => {
+      this._captureActiveProfile();
+      this._applyProfile(this.providerProfileSelect.value);
+    });
 
     // Auto-fetch when both fields filled (debounced)
     const debouncedFetch = this._debounce(() => {
@@ -191,9 +294,14 @@ class VideoTranscriber {
     this.apiKeyInput.addEventListener('input', debouncedFetch);
 
     // Persist settings
-    [this.modelBaseUrl, this.apiKeyInput, this.modelSelect, this.summaryLangSel].forEach(el => {
+    [this.modelBaseUrl, this.apiKeyInput, this.summaryLangSel].forEach(el => {
       el.addEventListener('change', () => this._saveSettings());
     });
+    this.modelSelect.addEventListener('change', () => {
+      this._restoreModelTemperature();
+      this._saveSettings();
+    });
+    this.temperatureInput.addEventListener('change', () => this._saveSettings());
 
     // Tabs
     this.tabBtns.forEach(btn => {
@@ -204,6 +312,31 @@ class VideoTranscriber {
     this.dlScript.addEventListener('click',      () => this._downloadFile('script'));
     this.dlTranslation.addEventListener('click', () => this._downloadFile('translation'));
     this.dlSummary.addEventListener('click',     () => this._downloadFile('summary'));
+
+    // Library
+    if (this.libraryHeader) {
+      this.libraryHeader.addEventListener('click', (e) => {
+        if (this.libraryRefreshBtn.contains(e.target)) return;
+        this._toggleLibrary();
+      });
+      this.libraryHeader.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._toggleLibrary(); }
+      });
+      this.libraryRefreshBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._loadLibrary();
+      });
+      this.libModalClose.addEventListener('click', () => this._closeLibModal());
+      this.libModalBackdrop.addEventListener('click', (e) => {
+        if (e.target === this.libModalBackdrop) this._closeLibModal();
+      });
+      this.libModalDownload.addEventListener('click', () => {
+        if (this._libModalFile) this._downloadLibFile(this._libModalFile.folder, this._libModalFile.name);
+      });
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && this.libModalBackdrop.classList.contains('show')) this._closeLibModal();
+      });
+    }
 
     if (this.uploadPickBtn && this.fileInput && this.uploadZone) {
       this.uploadPickBtn.addEventListener('click', (e) => {
@@ -263,44 +396,141 @@ class VideoTranscriber {
       const v = this.t(el.dataset.i18nPlaceholder);
       if (typeof v === 'string') el.placeholder = v;
     });
+    document.querySelectorAll('[data-i18n-title]').forEach(el => {
+      const v = this.t(el.dataset.i18nTitle);
+      if (typeof v === 'string') el.title = v;
+    });
   }
 
   /* ── Settings persistence ─────────────────────────────── */
+  _getActiveProfile() {
+    return this.settings?.profiles.find(profile => profile.id === this.settings.activeProfileId) || null;
+  }
+
+  _writeSettings() {
+    try { localStorage.setItem('vt_settings', JSON.stringify(this.settings)); } catch (_) {}
+  }
+
+  _captureActiveProfile() {
+    const profile = this._getActiveProfile();
+    if (!profile) return;
+    let updated = window.AIProfileStore.captureProfile(profile, {
+      baseUrl: this.modelBaseUrl.value,
+      apiKey: this.apiKeyInput.value,
+      modelId: this.modelSelect.value,
+    });
+    if (updated.lastModel) {
+      updated = window.AIProfileStore.setModelTemperature(
+        updated,
+        updated.lastModel,
+        this.temperatureInput.value,
+      );
+    }
+    const index = this.settings.profiles.findIndex(item => item.id === profile.id);
+    this.settings.profiles[index] = updated;
+    this.settings.summaryLang = this.summaryLangSel.value;
+  }
+
+  _renderProfileOptions() {
+    this.providerProfileSelect.innerHTML = '';
+    this.settings.profiles.forEach(profile => {
+      const option = document.createElement('option');
+      option.value = profile.id;
+      option.textContent = profile.name;
+      this.providerProfileSelect.appendChild(option);
+    });
+    this.providerProfileSelect.value = this.settings.activeProfileId;
+  }
+
+  _applyProfile(profileId, { fetchModels = true } = {}) {
+    const profile = this.settings.profiles.find(item => item.id === profileId) || this.settings.profiles[0];
+    if (!profile) return;
+    this._modelFetchToken = (this._modelFetchToken || 0) + 1;
+    this.settings.activeProfileId = profile.id;
+    this._renderProfileOptions();
+    this.modelBaseUrl.value = profile.baseUrl;
+    this.apiKeyInput.value = profile.apiKey;
+    this.modelSelect.innerHTML = `<option value="">${this.t('model_default')}</option>`;
+    this.temperatureInput.value = window.AIProfileStore.temperatureFor(profile, profile.lastModel);
+    this._setFetchStatus('', '');
+    this._writeSettings();
+
+    if (profile.baseUrl || profile.apiKey) {
+      this.settingsBody.classList.add('open');
+      this.settingsToggle.classList.add('open');
+    }
+    if (fetchModels && profile.baseUrl && profile.apiKey) {
+      setTimeout(() => this._fetchModels(true), 0);
+    }
+  }
+
+  _beginAddProfile() {
+    this._captureActiveProfile();
+    const profile = window.AIProfileStore.createProfile('New provider');
+    this.settings.profiles.push(profile);
+    this.settings.activeProfileId = profile.id;
+    this._applyProfile(profile.id, { fetchModels: false });
+    this.profileNameInput.value = '';
+    this.profileNameRow.hidden = false;
+    this.profileNameInput.focus();
+  }
+
+  _saveActiveProfile() {
+    this._captureActiveProfile();
+    const profile = this._getActiveProfile();
+    const enteredName = this.profileNameInput.value.trim();
+    if (profile && enteredName) profile.name = enteredName;
+    this.profileNameRow.hidden = true;
+    this.profileNameInput.value = '';
+    this._renderProfileOptions();
+    this._writeSettings();
+    this._setFetchStatus('ok', this.t('profile_saved'));
+  }
+
+  async _deleteActiveProfile() {
+    const profile = this._getActiveProfile();
+    const ok = await this._confirmDialog({
+      title: this.t('confirm_delete_title'),
+      message: this.t('confirm_delete_profile_msg')(profile?.name || ''),
+      okText: this.t('confirm_delete_ok'),
+      danger: true,
+    });
+    if (!ok) return;
+    const activeId = this.settings.activeProfileId;
+    this.settings.profiles = this.settings.profiles.filter(profile => profile.id !== activeId);
+    if (!this.settings.profiles.length) {
+      this.settings.profiles.push(window.AIProfileStore.createProfile('Default'));
+    }
+    this.profileNameRow.hidden = true;
+    this._applyProfile(this.settings.profiles[0].id);
+  }
+
+  _restoreModelTemperature() {
+    const profile = this._getActiveProfile();
+    this.temperatureInput.value = window.AIProfileStore.temperatureFor(
+      profile,
+      this.modelSelect.value,
+    );
+  }
+
   _saveSettings() {
-    const s = {
-      baseUrl:  this.modelBaseUrl.value,
-      apiKey:   this.apiKeyInput.value,
-      model:    this.modelSelect.value,
-      summaryLang: this.summaryLangSel.value,
-    };
-    try { localStorage.setItem('vt_settings', JSON.stringify(s)); } catch (_) {}
+    this._captureActiveProfile();
+    this._writeSettings();
   }
 
   _loadSettings() {
-    try {
-      const raw = localStorage.getItem('vt_settings');
-      if (!raw) return;
-      const s = JSON.parse(raw);
-      if (s.baseUrl)     this.modelBaseUrl.value = s.baseUrl;
-      if (s.apiKey)      this.apiKeyInput.value  = s.apiKey;
-      if (s.summaryLang) this.summaryLangSel.value = s.summaryLang;
-      // Model options will be restored after fetching
-      this._savedModel = s.model || '';
-
-      // Auto-open settings if credentials were saved
-      if (s.baseUrl || s.apiKey) {
-        this.settingsBody.classList.add('open');
-        this.settingsToggle.classList.add('open');
-        // Attempt to re-fetch model list silently
-        if (s.baseUrl && s.apiKey) {
-          setTimeout(() => this._fetchModels(true), 400);
-        }
-      }
-    } catch (_) {}
+    const raw = localStorage.getItem('vt_settings');
+    this.settings = window.AIProfileStore.load(raw);
+    this.summaryLangSel.value = this.settings.summaryLang;
+    this._renderProfileOptions();
+    this._applyProfile(this.settings.activeProfileId);
+    this._writeSettings();
   }
 
   /* ── Fetch models ─────────────────────────────────────── */
   async _fetchModels(silent = false) {
+    const fetchToken = ++this._modelFetchToken;
+    const profileId = this.settings.activeProfileId;
     const baseUrl = this.modelBaseUrl.value.trim().replace(/\/$/, '');
     const apiKey  = this.apiKeyInput.value.trim();
 
@@ -310,7 +540,7 @@ class VideoTranscriber {
     }
 
     this.fetchModelsBtn.disabled = true;
-    this.fetchIcon.className = 'fas fa-spinner fa-spin';
+    this.fetchIcon.classList.add('spinning');
     if (!silent) this._setFetchStatus('', this.t('fetching_models'));
 
     try {
@@ -319,12 +549,14 @@ class VideoTranscriber {
       fd.append('api_key',  apiKey);
 
       const resp = await fetch(`${this.apiBase}/models`, { method: 'POST', body: fd });
+      if (fetchToken !== this._modelFetchToken || profileId !== this.settings.activeProfileId) return;
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
         throw new Error(err.detail || `HTTP ${resp.status}`);
       }
       const data = await resp.json();
       const models = data.data || data.models || [];
+      const savedModel = this._getActiveProfile()?.lastModel || '';
 
       // Rebuild select options
       this.modelSelect.innerHTML = `<option value="">${this.t('model_default')}</option>`;
@@ -336,21 +568,31 @@ class VideoTranscriber {
       });
 
       // Restore previously selected model
-      if (this._savedModel) {
-        this.modelSelect.value = this._savedModel;
-        this._savedModel = '';
+      if (savedModel) {
+        if (![...this.modelSelect.options].some(option => option.value === savedModel)) {
+          const savedOption = document.createElement('option');
+          savedOption.value = savedModel;
+          savedOption.textContent = savedModel;
+          this.modelSelect.appendChild(savedOption);
+        }
+        this.modelSelect.value = savedModel;
       }
+      this._restoreModelTemperature();
+      this._saveSettings();
 
       this._setFetchStatus('ok', typeof this.t('models_loaded') === 'function'
         ? this.t('models_loaded')(models.length)
         : `${models.length} models`);
 
     } catch (e) {
+      if (fetchToken !== this._modelFetchToken || profileId !== this.settings.activeProfileId) return;
       console.warn('Model fetch error:', e);
       this._setFetchStatus('err', this.t('models_error') + ': ' + e.message);
     } finally {
-      this.fetchModelsBtn.disabled = false;
-      this.fetchIcon.className = 'fas fa-sync-alt';
+      if (fetchToken === this._modelFetchToken) {
+        this.fetchModelsBtn.disabled = false;
+        this.fetchIcon.classList.remove('spinning');
+      }
     }
   }
 
@@ -383,6 +625,7 @@ class VideoTranscriber {
       if (apiKey)  fd.append('api_key',       apiKey);
       if (baseUrl) fd.append('model_base_url', baseUrl);
       if (modelId) fd.append('model_id',       modelId);
+      fd.append('temperature', this.temperatureInput.value || '0.1');
 
       const resp = await fetch(`${this.apiBase}/process-video`, { method: 'POST', body: fd });
       if (!resp.ok) {
@@ -440,6 +683,7 @@ class VideoTranscriber {
       if (apiKey)  fd.append('api_key',       apiKey);
       if (baseUrl) fd.append('model_base_url', baseUrl);
       if (modelId) fd.append('model_id',       modelId);
+      fd.append('temperature', this.temperatureInput.value || '0.1');
 
       const resp = await fetch(`${this.apiBase}/process-video`, { method: 'POST', body: fd });
       if (!resp.ok) {
@@ -482,6 +726,7 @@ class VideoTranscriber {
         if (task.status === 'completed') {
           this._stopSP(); this._stopSSE(); this._setLoading(false); this._hideProgress();
           this._showResults(task.script, task.summary, task.video_title, task.translation, task.detected_language, task.summary_language);
+          this._loadLibrary();
         } else if (task.status === 'error') {
           this._stopSP(); this._stopSSE(); this._setLoading(false); this._hideProgress();
           this._showError(task.error || 'Processing error');
@@ -499,6 +744,7 @@ class VideoTranscriber {
             if (task?.status === 'completed') {
               this._stopSP(); this._setLoading(false); this._hideProgress();
               this._showResults(task.script, task.summary, task.video_title, task.translation, task.detected_language, task.summary_language);
+              this._loadLibrary();
               return;
             }
           }
@@ -570,6 +816,16 @@ class VideoTranscriber {
     else if (m.includes('完成') || m.includes('complet'))                  { this.sp.stage = 'completed';     this.sp.target = 100; }
 
     if (pct >= this.sp.target) this.sp.target = Math.min(pct + 8, 99);
+
+    // ── DAG 路径与条件阶段识别 ──────────────────────────────
+    if (m.includes('获取成功') || m.includes('subtitle found') || m.includes('字幕获取')) {
+      this._setDagPath('subtitle');
+    } else if (m.includes('未找到字幕') || m.includes('no subtitle') || m.includes('下载') || m.includes('download')) {
+      this._setDagPath('whisper');
+    }
+    if (m.includes('翻译') || m.includes('translat')) {
+      this._setDagTranslate(true);
+    }
   }
 
   _setModeBadge(mode) {
@@ -631,24 +887,137 @@ class VideoTranscriber {
     const p = Math.round(pct * 10) / 10;
     this.progressStatus.textContent = `${p}%`;
     this.progressFill.style.width   = `${p}%`;
+    this._renderDag(pct);
+  }
 
-    // Translate common server messages — more specific checks first
-    const m = (msg || '').toLowerCase();
-    let label = msg;
-    // ── Subtitle path ──────────────────────────────────────────
-    if      (m.includes('获取成功') || m.includes('subtitle found'))        label = this.t('subtitle_found');
-    else if (m.includes('未找到字幕') || m.includes('no subtitle'))         label = this.t('no_subtitle');
-    else if (m.includes('检测') && (m.includes('字幕') || m.includes('subtitle'))) label = this.t('detecting_subtitles');
-    // ── Audio / Whisper path ────────────────────────────────────
-    else if (m.includes('下载') || m.includes('download'))  label = this.t('downloading_video');
-    else if (m.includes('解析') || m.includes('pars'))      label = this.t('parsing_video');
-    else if (m.includes('转录') || m.includes('transcrib')) label = this.t('transcribing_audio');
-    else if (m.includes('优化') || m.includes('optimiz'))   label = this.t('optimizing_transcript');
-    else if (m.includes('摘要') || m.includes('summary'))   label = this.t('generating_summary');
-    else if (m.includes('完成') || m.includes('complet'))   label = this.t('completed');
-    else if (m.includes('准备') || m.includes('prepar'))    label = this.t('preparing');
+  /* ── Pipeline DAG (stage stepper) ─────────────────────── */
+  _dagIcons() {
+    return {
+      check: '<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 5"/></svg>',
+      spinner: '<svg class="ico spinning" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M8 2a6 6 0 1 1-5.2 3"/></svg>',
+    };
+  }
 
-    this.progressMessage.textContent = label;
+  _initDag() {
+    this.dag = { path: 'whisper', translate: false, built: '', stages: [] };
+    this._rebuildDag();
+    this._renderDag(0);
+  }
+
+  _dagStageDefs() {
+    const defs = [{ id: 'detect', start: 0, end: 15, kind: 'indet' }];
+    if (this.dag.path === 'subtitle') {
+      defs.push({ id: 'subtitle', start: 15, end: 55, kind: 'indet' });
+    } else {
+      defs.push({ id: 'download', start: 15, end: 40, kind: 'bar' });
+      defs.push({ id: 'transcribe', start: 40, end: 55, kind: 'bar' });
+    }
+    const t = this.dag.translate;
+    defs.push({ id: 'optimize', start: 55, end: t ? 70 : 80, kind: 'indet' });
+    if (t) defs.push({ id: 'translate', start: 70, end: 80, kind: 'indet' });
+    defs.push({ id: 'summary', start: 80, end: 99, kind: 'indet' });
+    return defs;
+  }
+
+  _rebuildDag() {
+    if (!this.dagList) return;
+    const key = `${this.dag.path}|${this.dag.translate}`;
+    if (this.dag.built === key) return;
+    this.dag.built = key;
+    this.dag.stages = this._dagStageDefs();
+    this.dagList.innerHTML = '';
+    this.dag.stages.forEach(s => {
+      const node = document.createElement('div');
+      node.className = 'dag-node';
+      node.innerHTML = `
+        <div class="dag-rail">
+          <div class="dag-dot"></div>
+          <div class="dag-line"></div>
+        </div>
+        <div class="dag-body">
+          <div class="dag-head">
+            <span class="dag-label">${this._esc(this.t('stage_' + s.id))}</span>
+            <span class="dag-status"></span>
+          </div>
+          <div class="dag-bar${s.kind === 'indet' ? ' indet' : ''}" style="display:none;">
+            <div class="dag-bar-fill"></div>
+          </div>
+        </div>`;
+      this.dagList.appendChild(node);
+      s.el = {
+        node,
+        dot: node.querySelector('.dag-dot'),
+        status: node.querySelector('.dag-status'),
+        bar: node.querySelector('.dag-bar'),
+        fill: node.querySelector('.dag-bar-fill'),
+      };
+      s.state = 'pending';
+    });
+  }
+
+  _dagDoing(id) {
+    const map = {
+      detect: 'detecting_subtitles',
+      subtitle: 'fetching_subtitles',
+      download: 'downloading_video',
+      transcribe: 'transcribing_audio',
+      optimize: 'optimizing_transcript',
+      translate: 'generating_translation',
+      summary: 'generating_summary',
+    };
+    return this.t(map[id]) || '';
+  }
+
+  _setDagPath(path) {
+    if (!this.dag || this.dag.path === path) return;
+    this.dag.path = path;
+    this._rebuildDag();
+    this._renderDag(this.sp.current);
+  }
+
+  _setDagTranslate(on) {
+    if (!this.dag || this.dag.translate === on) return;
+    this.dag.translate = on;
+    this._rebuildDag();
+    this._renderDag(this.sp.current);
+  }
+
+  _renderDag(pct) {
+    if (!this.dag || !this.dag.stages.length) return;
+    const icons = this._dagIcons();
+    const complete = pct >= 99.5;
+    let activeIdx = this.dag.stages.findIndex(s => pct < s.end);
+    if (activeIdx === -1) activeIdx = this.dag.stages.length - 1;
+
+    this.dag.stages.forEach((s, i) => {
+      const done = complete || pct >= s.end;
+      const active = !done && i === activeIdx;
+      const state = done ? 'done' : active ? 'active' : 'pending';
+
+      if (s.state !== state) {
+        s.state = state;
+        s.el.node.classList.remove('done', 'active');
+        if (state !== 'pending') s.el.node.classList.add(state);
+        s.el.dot.innerHTML = state === 'done' ? icons.check : state === 'active' ? icons.spinner : '';
+      }
+
+      if (done) {
+        s.el.status.textContent = this.t('dag_done');
+      } else if (active && s.kind === 'bar') {
+        const p = Math.max(0, Math.min(100, ((pct - s.start) / (s.end - s.start)) * 100));
+        s.el.status.textContent = `${this._dagDoing(s.id)} ${Math.round(p)}%`;
+      } else if (active) {
+        s.el.status.textContent = this._dagDoing(s.id);
+      } else {
+        s.el.status.textContent = '';
+      }
+
+      s.el.bar.style.display = state === 'pending' ? 'none' : '';
+      if (s.kind === 'bar') {
+        const p = done ? 100 : Math.max(0, Math.min(100, ((pct - s.start) / (s.end - s.start)) * 100));
+        s.el.fill.style.width = `${p}%`;
+      }
+    });
   }
 
   _showProgress() {
@@ -658,6 +1027,7 @@ class VideoTranscriber {
     // Reset mode badge & progress bar color for new task
     if (this.modeBadge) { this.modeBadge.style.display = 'none'; this.modeBadge.className = 'mode-badge'; }
     if (this.progressFill) this.progressFill.classList.remove('subtitle-mode');
+    this._initDag();
   }
   _hideProgress() { this.progressPanel.classList.remove('show'); }
 
@@ -709,14 +1079,16 @@ class VideoTranscriber {
       const task = await r.json();
 
       let filename;
-      if      (type === 'script')      filename = task.script_path      ? task.script_path.split('/').pop()      : `transcript_${task.safe_title||'x'}_${task.short_id||'x'}.md`;
-      else if (type === 'summary')     filename = task.summary_path     ? task.summary_path.split('/').pop()     : `summary_${task.safe_title||'x'}_${task.short_id||'x'}.md`;
-      else if (type === 'translation') filename = task.translation_path ? task.translation_path.split('/').pop() : `translation_${task.safe_title||'x'}_${task.short_id||'x'}.md`;
+      if      (type === 'script')      filename = task.script_filename      || (task.script_path      ? task.script_path.split('/').pop()      : `transcript_${task.safe_title||'x'}_${task.short_id||'x'}.md`);
+      else if (type === 'summary')     filename = task.summary_filename     || (task.summary_path     ? task.summary_path.split('/').pop()     : `summary_${task.safe_title||'x'}_${task.short_id||'x'}.md`);
+      else if (type === 'translation') filename = task.translation_filename || (task.translation_path ? task.translation_path.split('/').pop() : `translation_${task.safe_title||'x'}_${task.short_id||'x'}.md`);
       else throw new Error('Unknown type');
 
       const a = document.createElement('a');
-      a.href = `${this.apiBase}/download/${encodeURIComponent(filename)}`;
-      a.download = filename;
+      a.href = task.output_folder
+        ? `${this.apiBase}/download/${encodeURIComponent(task.output_folder)}/${encodeURIComponent(filename)}`
+        : `${this.apiBase}/download/${encodeURIComponent(filename)}`;
+      a.download = task.output_folder ? `${task.output_folder}_${filename}` : filename;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -725,12 +1097,232 @@ class VideoTranscriber {
     }
   }
 
+  /* ── Library (generated files) ────────────────────────── */
+  _initLibrary() {
+    if (!this.libraryCard) return;
+    // 默认展开面板；记住用户折叠偏好
+    const collapsed = localStorage.getItem('vt_lib_collapsed') === '1';
+    this.libraryCard.classList.toggle('open', !collapsed);
+    this.libraryHeader.setAttribute('aria-expanded', String(!collapsed));
+    this._loadLibrary();
+  }
+
+  _toggleLibrary() {
+    const open = this.libraryCard.classList.toggle('open');
+    this.libraryHeader.setAttribute('aria-expanded', String(open));
+    try { localStorage.setItem('vt_lib_collapsed', open ? '0' : '1'); } catch (_) {}
+    if (open) this._loadLibrary();
+  }
+
+  async _loadLibrary() {
+    try {
+      const r = await fetch(`${this.apiBase}/files`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      this._renderLibrary(data.groups || []);
+    } catch (e) {
+      this.libraryGroupsEl.innerHTML = '';
+      this.libraryEmpty.style.display = 'block';
+      this.libraryEmpty.textContent = this.t('error_processing_failed') + (e.message || '');
+    }
+  }
+
+  _renderLibrary(groups) {
+    const total = groups.reduce((n, g) => n + g.files.length, 0);
+    this.libraryCount.hidden = total === 0;
+    this.libraryCount.textContent = String(total);
+
+    if (!groups.length) {
+      this.libraryGroupsEl.innerHTML = '';
+      this.libraryEmpty.style.display = 'block';
+      this.libraryEmpty.textContent = this.t('library_empty');
+      return;
+    }
+    this.libraryEmpty.style.display = 'none';
+
+    // 新分组默认展开第一个；保留用户已展开的分组
+    if (!this._libOpenGroups.size && groups[0]) this._libOpenGroups.add(groups[0].folder);
+
+    this.libraryGroupsEl.innerHTML = '';
+    groups.forEach(g => {
+      const groupEl = document.createElement('div');
+      groupEl.className = 'lib-group' + (this._libOpenGroups.has(g.folder) ? ' open' : '');
+
+      const head = document.createElement('div');
+      head.className = 'lib-group-head';
+      head.innerHTML = `
+        <svg class="lib-group-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4l4 4-4 4"/></svg>
+        <span class="lib-group-title">${this._esc(g.title || this.t('library_ungrouped'))}</span>
+        <span class="lib-group-meta">${this.t('library_files_count')(g.files.length)} · ${this._fmtTime(g.mtime)}</span>
+        ${g.folder !== '_root' ? `
+        <button type="button" class="lib-icon-btn danger lib-group-del" title="${this._esc(this.t('library_delete'))}">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4h11"/><path d="M6.5 4V2.5h3V4"/><path d="M4 4l.7 9.5h6.6L12 4"/></svg>
+        </button>` : ''}`;
+      head.addEventListener('click', () => {
+        const open = groupEl.classList.toggle('open');
+        if (open) this._libOpenGroups.add(g.folder);
+        else this._libOpenGroups.delete(g.folder);
+      });
+      const delBtn = head.querySelector('.lib-group-del');
+      if (delBtn) {
+        delBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this._deleteLibGroup(g.folder, g.title || this.t('library_ungrouped'), g.files.length);
+        });
+      }
+      groupEl.appendChild(head);
+
+      const filesEl = document.createElement('div');
+      filesEl.className = 'lib-files';
+      g.files.forEach(f => filesEl.appendChild(this._renderLibFile(g.folder, f)));
+      groupEl.appendChild(filesEl);
+
+      this.libraryGroupsEl.appendChild(groupEl);
+    });
+  }
+
+  _renderLibFile(folder, f) {
+    const row = document.createElement('div');
+    row.className = 'lib-file';
+
+    const kind = f.kind || 'other';
+    const meta = `${this._fmtSize(f.size)} · ${this._fmtTime(f.mtime)}`;
+    row.innerHTML = `
+      <span class="lib-badge ${this._esc(kind)}">${this._esc(this.t(`kind_${kind}`) || kind)}</span>
+      <span class="lib-file-name">${this._esc(f.name)}</span>
+      ${f.model ? `<span class="lib-file-model">${this._esc(f.model)}</span>` : ''}
+      <span class="lib-file-meta">${this._esc(meta)}</span>
+      <span class="lib-file-actions">
+        <button type="button" class="lib-icon-btn lib-act-dl" title="${this._esc(this.t('library_download'))}">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v8M5 7.5l3 3 3-3"/><path d="M2.5 12.5h11"/></svg>
+        </button>
+      </span>`;
+
+    row.addEventListener('click', () => this._openLibPreview(folder, f.name));
+    row.querySelector('.lib-act-dl').addEventListener('click', (e) => {
+      e.stopPropagation();
+      this._downloadLibFile(folder, f.name);
+    });
+    return row;
+  }
+
+  async _openLibPreview(folder, name) {
+    try {
+      const r = await fetch(`${this.apiBase}/files/${encodeURIComponent(folder)}/${encodeURIComponent(name)}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const f = await r.json();
+      this._libModalFile = { folder, name };
+      const kind = f.kind || 'other';
+      this.libModalBadge.className = `lib-badge ${kind}`;
+      this.libModalBadge.textContent = this.t(`kind_${kind}`) || kind;
+      this.libModalTitle.textContent = name;
+      this.libModalBody.innerHTML = marked.parse(f.content || '');
+      this.libModalBackdrop.classList.add('show');
+      document.body.style.overflow = 'hidden';
+    } catch (e) {
+      this._showError(this.t('error_processing_failed') + (e.message || ''));
+    }
+  }
+
+  _closeLibModal() {
+    this.libModalBackdrop.classList.remove('show');
+    document.body.style.overflow = '';
+    this._libModalFile = null;
+  }
+
+  _downloadLibFile(folder, name) {
+    const a = document.createElement('a');
+    const isRoot = folder === '_root';
+    a.href = isRoot
+      ? `${this.apiBase}/download/${encodeURIComponent(name)}`
+      : `${this.apiBase}/download/${encodeURIComponent(folder)}/${encodeURIComponent(name)}`;
+    a.download = isRoot ? name : `${folder}_${name}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  async _deleteLibGroup(folder, title, fileCount) {
+    const ok = await this._confirmDialog({
+      title: this.t('confirm_delete_title'),
+      message: this.t('confirm_delete_group_msg')(title, fileCount),
+      okText: this.t('confirm_delete_ok'),
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      const r = await fetch(`${this.apiBase}/files/${encodeURIComponent(folder)}`, { method: 'DELETE' });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      if (this._libModalFile?.folder === folder) this._closeLibModal();
+      this._libOpenGroups.delete(folder);
+      await this._loadLibrary();
+    } catch (e) {
+      this._showError(this.t('error_processing_failed') + (e.message || ''));
+    }
+  }
+
+  /* ── Styled confirm dialog ────────────────────────────── */
+  _confirmDialog({ title, message, okText, cancelText, danger = false }) {
+    return new Promise((resolve) => {
+      this.confirmTitle.textContent = title || '';
+      this.confirmMsg.textContent = message || '';
+      this.confirmOk.textContent = okText || this.t('confirm_ok');
+      this.confirmCancel.textContent = cancelText || this.t('confirm_cancel');
+      this.confirmOk.classList.toggle('danger', danger);
+      this.confirmOk.classList.toggle('primary', !danger);
+      this.confirmBackdrop.classList.add('show');
+      document.body.style.overflow = 'hidden';
+
+      const cleanup = (result) => {
+        this.confirmBackdrop.classList.remove('show');
+        document.body.style.overflow = '';
+        this.confirmOk.removeEventListener('click', onOk);
+        this.confirmCancel.removeEventListener('click', onCancel);
+        this.confirmBackdrop.removeEventListener('click', onBackdrop);
+        document.removeEventListener('keydown', onKey);
+        resolve(result);
+      };
+      const onOk = () => cleanup(true);
+      const onCancel = () => cleanup(false);
+      const onBackdrop = (e) => { if (e.target === this.confirmBackdrop) cleanup(false); };
+      const onKey = (e) => {
+        if (e.key === 'Escape') cleanup(false);
+        else if (e.key === 'Enter') { e.preventDefault(); cleanup(true); }
+      };
+
+      this.confirmOk.addEventListener('click', onOk);
+      this.confirmCancel.addEventListener('click', onCancel);
+      this.confirmBackdrop.addEventListener('click', onBackdrop);
+      document.addEventListener('keydown', onKey);
+      this.confirmCancel.focus();
+    });
+  }
+
+  /* ── Library helpers ──────────────────────────────────── */
+  _esc(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
+  _fmtSize(bytes) {
+    const n = Number(bytes) || 0;
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  }
+  _fmtTime(mtime) {
+    if (!mtime) return '';
+    const d = new Date(mtime * 1000);
+    const pad = (x) => String(x).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
   /* ── UI helpers ───────────────────────────────────────── */
   _setLoading(on) {
     this.submitBtn.disabled = on;
     this.submitBtn.innerHTML = on
       ? `<span class="spinner"></span> ${this.t('processing')}`
-      : `<i class="fas fa-search"></i> <span>${this.t('start_transcription')}</span>`;
+      : `<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg> <span>${this.t('start_transcription')}</span>`;
     if (this.uploadPickBtn) this.uploadPickBtn.disabled = on;
     if (this.uploadZone) {
       this.uploadZone.style.pointerEvents = on ? 'none' : '';

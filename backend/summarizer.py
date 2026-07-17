@@ -4,19 +4,27 @@ import logging
 from typing import Optional
 
 from llm_sanitize import strip_llm_artifacts
+from model_settings import validate_temperature
 
 logger = logging.getLogger(__name__)
 
 class Summarizer:
     """文本总结器，使用OpenAI API生成多语言摘要"""
     
-    def __init__(self, api_key: str = None, base_url: str = None, model: str = None):
+    def __init__(
+        self,
+        api_key: str = None,
+        base_url: str = None,
+        model: str = None,
+        temperature: float = 0.1,
+    ):
         """
         初始化总结器。
 
         优先级：参数 > 环境变量。
         model 指定时会同时作为 fast_model 和 advanced_model 使用。
         """
+        self.temperature = validate_temperature(temperature)
         effective_key = api_key or os.getenv("OPENAI_API_KEY")
         effective_url = base_url or os.getenv("OPENAI_BASE_URL")
 
@@ -53,6 +61,10 @@ class Summarizer:
             "ar": "العربية"
         }
     
+    def _create_completion(self, **kwargs):
+        kwargs["temperature"] = self.temperature
+        return self.client.chat.completions.create(**kwargs)
+
     async def optimize_transcript(self, raw_transcript: str) -> str:
         """
         优化转录文本：修正错别字，按含义分段
@@ -173,14 +185,13 @@ class Summarizer:
 
 请特别注意修复因时间戳分割导致的句子不完整问题，并进行合理的段落划分！"""
 
-        response = self.client.chat.completions.create(
+        response = self._create_completion(
             model=self.fast_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
             max_tokens=4000,  # 对齐JS：优化/格式化阶段最大tokens≈4000
-            temperature=0.1
         )
         
         return strip_llm_artifacts(response.choices[0].message.content or "")
@@ -221,14 +232,13 @@ class Summarizer:
 输出清理后的文本，保持原文结构。"""
 
             try:
-                response = self.client.chat.completions.create(
+                response = self._create_completion(
                     model=self.fast_model,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
                     max_tokens=1200,  # 适应4000 tokens总限制
-                    temperature=0.1
                 )
                 
                 optimized_chunk = strip_llm_artifacts(response.choices[0].message.content or "")
@@ -309,14 +319,13 @@ class Summarizer:
             )
 
         try:
-            response = self.client.chat.completions.create(
+            response = self._create_completion(
                 model=self.fast_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}
                 ],
                 max_tokens=4000,  # 对齐JS：优化/格式化阶段最大tokens≈4000
-                temperature=0.1
             )
             optimized_text = strip_llm_artifacts(response.choices[0].message.content or "")
             # 移除诸如 "# Transcript" / "## Transcript" 等标题
@@ -792,14 +801,13 @@ class Summarizer:
 
 重新分段后的文本："""
 
-            response = self.client.chat.completions.create(
+            response = self._create_completion(
                 model=self.advanced_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
                 max_tokens=4000,  # 对齐JS：段落整理阶段最大tokens≈4000
-                temperature=0.05  # 降低温度，提高一致性
             )
             
             organized_text = strip_llm_artifacts(response.choices[0].message.content or "")
@@ -871,14 +879,13 @@ Core requirements:
 
 {text}"""
 
-        response = self.client.chat.completions.create(
+        response = self._create_completion(
             model=self.advanced_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
             max_tokens=1200,  # 适应4000 tokens总限制
-            temperature=0.05
         )
         
         return strip_llm_artifacts(response.choices[0].message.content or "")
@@ -1026,14 +1033,13 @@ Output ONLY the summary body in {language_name}."""
         logger.info(f"正在生成{language_name}摘要...")
         
         # 调用OpenAI API
-        response = self.client.chat.completions.create(
+        response = self._create_completion(
             model=self.advanced_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
             max_tokens=2200,
-            temperature=0.25
         )
         
         summary = strip_llm_artifacts(response.choices[0].message.content or "")
@@ -1072,14 +1078,13 @@ Rules:
 Output content only, no headings like "Summary:"."""
 
             try:
-                response = self.client.chat.completions.create(
+                response = self._create_completion(
                     model=self.advanced_model,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
                     max_tokens=600,
-                    temperature=0.25
                 )
                 
                 chunk_summary = strip_llm_artifacts(response.choices[0].message.content or "")
@@ -1164,14 +1169,13 @@ Rules:
 
 {combined_summaries}"""
 
-            response = self.client.chat.completions.create(
+            response = self._create_completion(
                 model=self.advanced_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
                 max_tokens=2200,
-                temperature=0.25
             )
 
             return strip_llm_artifacts(response.choices[0].message.content or "")
