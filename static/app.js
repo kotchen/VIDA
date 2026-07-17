@@ -78,8 +78,12 @@ class VideoTranscriber {
         library_delete:          'Delete',
         library_ungrouped:       'Ungrouped (legacy)',
         library_files_count:     (n) => `${n} file${n > 1 ? 's' : ''}`,
-        library_delete_file_confirm:  'Delete this file?',
-        library_delete_group_confirm: 'Delete this folder and all its files?',
+        confirm_delete_title:    'Confirm delete',
+        confirm_delete_group_msg: (title, n) => `Delete "${title}" and all ${n} file${n > 1 ? 's' : ''} in it? This cannot be undone.`,
+        confirm_delete_profile_msg: (name) => `Delete provider profile "${name}"? This cannot be undone.`,
+        confirm_delete_ok:       'Delete',
+        confirm_cancel:          'Cancel',
+        confirm_ok:              'OK',
         kind_raw:                'Raw',
         kind_transcript:         'Transcript',
         kind_translation:        'Translation',
@@ -158,8 +162,12 @@ class VideoTranscriber {
         library_delete:          '删除',
         library_ungrouped:       '未分组（旧版）',
         library_files_count:     (n) => `${n} 个文件`,
-        library_delete_file_confirm:  '确定删除这个文件吗？',
-        library_delete_group_confirm: '确定删除整个文件夹及其所有文件吗？',
+        confirm_delete_title:    '确认删除',
+        confirm_delete_group_msg: (title, n) => `将删除「${title}」及其中的 ${n} 个文件，此操作无法撤销。`,
+        confirm_delete_profile_msg: (name) => `将删除供应商配置「${name}」，此操作无法撤销。`,
+        confirm_delete_ok:       '删除',
+        confirm_cancel:          '取消',
+        confirm_ok:              '确定',
         kind_raw:                '原始',
         kind_transcript:         '转录',
         kind_translation:        '翻译',
@@ -245,6 +253,11 @@ class VideoTranscriber {
     this.libModalBody       = document.getElementById('libModalBody');
     this.libModalDownload   = document.getElementById('libModalDownload');
     this.libModalClose      = document.getElementById('libModalClose');
+    this.confirmBackdrop    = document.getElementById('confirmBackdrop');
+    this.confirmTitle       = document.getElementById('confirmTitle');
+    this.confirmMsg         = document.getElementById('confirmMsg');
+    this.confirmOk          = document.getElementById('confirmOk');
+    this.confirmCancel      = document.getElementById('confirmCancel');
     this._libOpenGroups     = new Set();
     this._libModalFile      = null;
   }
@@ -474,8 +487,15 @@ class VideoTranscriber {
     this._setFetchStatus('ok', this.t('profile_saved'));
   }
 
-  _deleteActiveProfile() {
-    if (!window.confirm(this.t('profile_delete_confirm'))) return;
+  async _deleteActiveProfile() {
+    const profile = this._getActiveProfile();
+    const ok = await this._confirmDialog({
+      title: this.t('confirm_delete_title'),
+      message: this.t('confirm_delete_profile_msg')(profile?.name || ''),
+      okText: this.t('confirm_delete_ok'),
+      danger: true,
+    });
+    if (!ok) return;
     const activeId = this.settings.activeProfileId;
     this.settings.profiles = this.settings.profiles.filter(profile => profile.id !== activeId);
     if (!this.settings.profiles.length) {
@@ -1133,12 +1153,23 @@ class VideoTranscriber {
       head.innerHTML = `
         <svg class="lib-group-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4l4 4-4 4"/></svg>
         <span class="lib-group-title">${this._esc(g.title || this.t('library_ungrouped'))}</span>
-        <span class="lib-group-meta">${this.t('library_files_count')(g.files.length)} · ${this._fmtTime(g.mtime)}</span>`;
+        <span class="lib-group-meta">${this.t('library_files_count')(g.files.length)} · ${this._fmtTime(g.mtime)}</span>
+        ${g.folder !== '_root' ? `
+        <button type="button" class="lib-icon-btn danger lib-group-del" title="${this._esc(this.t('library_delete'))}">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4h11"/><path d="M6.5 4V2.5h3V4"/><path d="M4 4l.7 9.5h6.6L12 4"/></svg>
+        </button>` : ''}`;
       head.addEventListener('click', () => {
         const open = groupEl.classList.toggle('open');
         if (open) this._libOpenGroups.add(g.folder);
         else this._libOpenGroups.delete(g.folder);
       });
+      const delBtn = head.querySelector('.lib-group-del');
+      if (delBtn) {
+        delBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this._deleteLibGroup(g.folder, g.title || this.t('library_ungrouped'), g.files.length);
+        });
+      }
       groupEl.appendChild(head);
 
       const filesEl = document.createElement('div');
@@ -1165,19 +1196,12 @@ class VideoTranscriber {
         <button type="button" class="lib-icon-btn lib-act-dl" title="${this._esc(this.t('library_download'))}">
           <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v8M5 7.5l3 3 3-3"/><path d="M2.5 12.5h11"/></svg>
         </button>
-        <button type="button" class="lib-icon-btn danger lib-act-del" title="${this._esc(this.t('library_delete'))}">
-          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4h11"/><path d="M6.5 4V2.5h3V4"/><path d="M4 4l.7 9.5h6.6L12 4"/></svg>
-        </button>
       </span>`;
 
     row.addEventListener('click', () => this._openLibPreview(folder, f.name));
     row.querySelector('.lib-act-dl').addEventListener('click', (e) => {
       e.stopPropagation();
       this._downloadLibFile(folder, f.name);
-    });
-    row.querySelector('.lib-act-del').addEventListener('click', (e) => {
-      e.stopPropagation();
-      this._deleteLibFile(folder, f.name);
     });
     return row;
   }
@@ -1218,16 +1242,60 @@ class VideoTranscriber {
     document.body.removeChild(a);
   }
 
-  async _deleteLibFile(folder, name) {
-    if (!window.confirm(this.t('library_delete_file_confirm'))) return;
+  async _deleteLibGroup(folder, title, fileCount) {
+    const ok = await this._confirmDialog({
+      title: this.t('confirm_delete_title'),
+      message: this.t('confirm_delete_group_msg')(title, fileCount),
+      okText: this.t('confirm_delete_ok'),
+      danger: true,
+    });
+    if (!ok) return;
     try {
-      const r = await fetch(`${this.apiBase}/files/${encodeURIComponent(folder)}/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      const r = await fetch(`${this.apiBase}/files/${encodeURIComponent(folder)}`, { method: 'DELETE' });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      if (this._libModalFile?.folder === folder && this._libModalFile?.name === name) this._closeLibModal();
+      if (this._libModalFile?.folder === folder) this._closeLibModal();
+      this._libOpenGroups.delete(folder);
       await this._loadLibrary();
     } catch (e) {
       this._showError(this.t('error_processing_failed') + (e.message || ''));
     }
+  }
+
+  /* ── Styled confirm dialog ────────────────────────────── */
+  _confirmDialog({ title, message, okText, cancelText, danger = false }) {
+    return new Promise((resolve) => {
+      this.confirmTitle.textContent = title || '';
+      this.confirmMsg.textContent = message || '';
+      this.confirmOk.textContent = okText || this.t('confirm_ok');
+      this.confirmCancel.textContent = cancelText || this.t('confirm_cancel');
+      this.confirmOk.classList.toggle('danger', danger);
+      this.confirmOk.classList.toggle('primary', !danger);
+      this.confirmBackdrop.classList.add('show');
+      document.body.style.overflow = 'hidden';
+
+      const cleanup = (result) => {
+        this.confirmBackdrop.classList.remove('show');
+        document.body.style.overflow = '';
+        this.confirmOk.removeEventListener('click', onOk);
+        this.confirmCancel.removeEventListener('click', onCancel);
+        this.confirmBackdrop.removeEventListener('click', onBackdrop);
+        document.removeEventListener('keydown', onKey);
+        resolve(result);
+      };
+      const onOk = () => cleanup(true);
+      const onCancel = () => cleanup(false);
+      const onBackdrop = (e) => { if (e.target === this.confirmBackdrop) cleanup(false); };
+      const onKey = (e) => {
+        if (e.key === 'Escape') cleanup(false);
+        else if (e.key === 'Enter') { e.preventDefault(); cleanup(true); }
+      };
+
+      this.confirmOk.addEventListener('click', onOk);
+      this.confirmCancel.addEventListener('click', onCancel);
+      this.confirmBackdrop.addEventListener('click', onBackdrop);
+      document.addEventListener('keydown', onKey);
+      this.confirmCancel.focus();
+    });
   }
 
   /* ── Library helpers ──────────────────────────────────── */

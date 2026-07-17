@@ -818,8 +818,22 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .lib-file-meta { font-size: 10.5px; color: var(--text-dim); flex-shrink: 0; }
-    .lib-file-actions { display: flex; gap: 3px; flex-shrink: 0; opacity: 0; transition: opacity .15s; }
+    .lib-file-meta {
+      font-size: 10.5px;
+      color: var(--text-dim);
+      flex-shrink: 0;
+      width: 148px;
+      text-align: right;
+    }
+    .lib-file-actions {
+      display: flex;
+      gap: 3px;
+      flex-shrink: 0;
+      width: 30px;
+      justify-content: flex-end;
+      opacity: 0;
+      transition: opacity .15s;
+    }
     .lib-file:hover .lib-file-actions,
     .lib-file:focus-within .lib-file-actions { opacity: 1; }
     @media (hover: none) { .lib-file-actions { opacity: 1; } }
@@ -871,6 +885,82 @@
       text-overflow: ellipsis;
     }
     .lib-modal-body { padding: 18px 22px; overflow-y: auto; }
+
+    /* ── Confirm dialog ──────────────────────────────────── */
+    .cf-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.62);
+      backdrop-filter: blur(3px);
+      z-index: 70;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .cf-backdrop.show { display: flex; }
+    .cf-dialog {
+      background: var(--surface);
+      border: 1px solid var(--border-light);
+      border-radius: var(--r);
+      width: min(400px, 100%);
+      padding: 22px 22px 18px;
+      box-shadow: 0 18px 60px rgba(0,0,0,.5);
+      animation: cfIn .16s ease-out;
+    }
+    @keyframes cfIn {
+      from { opacity: 0; transform: translateY(6px) scale(.97); }
+      to   { opacity: 1; transform: none; }
+    }
+    .cf-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(224,120,120,.1);
+      border: 1px solid rgba(224,120,120,.3);
+      color: var(--error);
+      margin-bottom: 12px;
+    }
+    .cf-icon .ico { width: 17px; height: 17px; }
+    .cf-title { font-size: 14px; font-weight: 650; margin-bottom: 6px; }
+    .cf-msg {
+      font-size: 12.5px;
+      color: var(--text-muted);
+      line-height: 1.65;
+      margin-bottom: 18px;
+      word-break: break-word;
+    }
+    .cf-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .cf-btn {
+      border-radius: var(--r-sm);
+      padding: 7px 16px;
+      font-size: 12.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all .15s;
+    }
+    .cf-btn.ghost {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+    }
+    .cf-btn.ghost:hover { border-color: var(--border-light); color: var(--text); }
+    .cf-btn.danger {
+      background: rgba(224,120,120,.12);
+      border: 1px solid rgba(224,120,120,.4);
+      color: var(--error);
+    }
+    .cf-btn.danger:hover { background: rgba(224,120,120,.2); }
+    .cf-btn.primary {
+      background: var(--accent);
+      border: 1px solid var(--accent);
+      color: #fff;
+    }
+    .cf-btn.primary:hover { background: var(--accent-h); }
+    .cf-btn:focus-visible { outline: 2px solid var(--accent-dim); outline-offset: 1px; }
 
     /* ── Footer ──────────────────────────────────────────── */
     .footer {
@@ -1190,12 +1280,27 @@
     </div>
   </div>
 
+  <!-- Confirm dialog -->
+  <div class="cf-backdrop" id="confirmBackdrop">
+    <div class="cf-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmMsg">
+      <div class="cf-icon">
+        <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 5.5v3.5M8 12h.01"/><path d="M6.9 2.3L1.8 11a1.5 1.5 0 0 0 1.3 2.2h9.8a1.5 1.5 0 0 0 1.3-2.2L9.1 2.3a1.5 1.5 0 0 0-2.2 0z" transform="translate(0 .5)"/></svg>
+      </div>
+      <div class="cf-title" id="confirmTitle"></div>
+      <div class="cf-msg" id="confirmMsg"></div>
+      <div class="cf-actions">
+        <button type="button" class="cf-btn ghost" id="confirmCancel">Cancel</button>
+        <button type="button" class="cf-btn danger" id="confirmOk">Delete</button>
+      </div>
+    </div>
+  </div>
+
   <div class="footer">
     <p data-i18n="footer_text">This tool is part of <a href="https://sipsip.ai" target="_blank" style="color:var(--accent-text);text-decoration:none;">sipsip.ai</a> — distill anything and get daily AI briefs from your favorite creators</p>
   </div>
 </main>
 
-<script src="/static/settings-store.js?v=20260717b"></script>
-<script src="/static/app.js?v=20260717b"></script>
+<script src="/static/settings-store.js?v=20260717c"></script>
+<script src="/static/app.js?v=20260717c"></script>
 </body>
 </html>
