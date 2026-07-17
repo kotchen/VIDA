@@ -287,7 +287,7 @@
       transition: max-height .3s ease, margin-top .3s;
     }
     .settings-body.open {
-      max-height: 240px;
+      max-height: 430px;
       margin-top: 12px;
     }
 
@@ -303,6 +303,52 @@
       gap: 14px;
     }
     .settings-grid .span2 { grid-column: 1 / -1; }
+
+    .profile-toolbar-row {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .profile-toolbar-row .s-select { flex: 1; min-width: 0; }
+    .profile-actions { display: flex; gap: 5px; flex-shrink: 0; }
+    .btn-profile {
+      position: relative;
+      width: 34px;
+      height: 34px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--surface-3);
+      border: 1px solid var(--border);
+      border-radius: var(--r-sm);
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: border-color .2s, color .2s, background .2s;
+    }
+    .btn-profile:hover { border-color: var(--accent-dim); color: var(--accent-text); }
+    .btn-profile.danger:hover { border-color: rgba(224,120,120,.45); color: var(--error); }
+    .btn-profile[data-tooltip]::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      z-index: 4;
+      bottom: calc(100% + 7px);
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--surface-3);
+      border: 1px solid var(--border-light);
+      border-radius: 5px;
+      color: var(--text);
+      font-size: 11px;
+      font-weight: 400;
+      padding: 3px 7px;
+      white-space: nowrap;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .15s;
+    }
+    .btn-profile[data-tooltip]:hover::after,
+    .btn-profile[data-tooltip]:focus-visible::after { opacity: 1; }
+    .profile-name-row[hidden] { display: none; }
 
     .s-label {
       display: block;
@@ -550,7 +596,9 @@
       .settings-row { flex-wrap: wrap; gap: 10px; }
       .settings-grid { grid-template-columns: 1fr; }
       .settings-grid .span2 { grid-column: 1; }
-      .settings-body.open { max-height: 320px; }
+      .settings-body.open { max-height: 620px; }
+      .profile-toolbar-row { align-items: stretch; flex-wrap: wrap; }
+      .profile-toolbar-row .s-select { flex-basis: calc(100% - 125px); }
     }
   </style>
 </head>
@@ -642,6 +690,30 @@
     <div class="settings-card">
       <div class="settings-grid">
 
+        <!-- Saved provider profile toolbar -->
+        <div class="span2">
+          <label class="s-label" for="providerProfileSelect" data-i18n="provider_profile">Provider profile</label>
+          <div class="profile-toolbar-row">
+            <select id="providerProfileSelect" class="s-select"></select>
+            <div class="profile-actions">
+              <button type="button" id="addProfileBtn" class="btn-profile" aria-label="Add provider profile" data-tooltip="Add profile">
+                <i class="fas fa-plus" aria-hidden="true"></i>
+              </button>
+              <button type="button" id="saveProfileBtn" class="btn-profile" aria-label="Save provider profile" data-tooltip="Save profile">
+                <i class="fas fa-save" aria-hidden="true"></i>
+              </button>
+              <button type="button" id="deleteProfileBtn" class="btn-profile danger" aria-label="Delete provider profile" data-tooltip="Delete profile">
+                <i class="fas fa-trash-alt" aria-hidden="true"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="span2 profile-name-row" id="profileNameRow" hidden>
+          <label class="s-label" for="profileNameInput" data-i18n="profile_name">Profile name</label>
+          <input id="profileNameInput" class="s-input" type="text" maxlength="40" autocomplete="off">
+        </div>
+
         <!-- Base URL (full row) -->
         <div class="span2">
           <label class="s-label" data-i18n="model_base_url">Model API Base URL</label>
@@ -656,7 +728,7 @@
         </div>
 
         <!-- API Key -->
-        <div>
+        <div class="span2">
           <label class="s-label" data-i18n="api_key">API Key</label>
           <div class="key-row">
             <input
@@ -681,6 +753,12 @@
           <select id="modelSelect" class="s-select">
             <option value="" data-i18n="model_default">— use server default —</option>
           </select>
+        </div>
+
+        <!-- Model temperature -->
+        <div>
+          <label class="s-label" for="temperatureInput" data-i18n="temperature">Temperature</label>
+          <input id="temperatureInput" class="s-input" type="number" min="0" max="2" step="0.1" value="0.1" inputmode="decimal">
         </div>
 
       </div>
@@ -758,6 +836,7 @@
   </div>
 </main>
 
-<script src="/static/app.js?v=20260307"></script>
+<script src="/static/settings-store.js?v=20260717"></script>
+<script src="/static/app.js?v=20260717"></script>
 </body>
 </html>

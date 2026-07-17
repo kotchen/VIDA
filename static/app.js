@@ -29,6 +29,11 @@ class VideoTranscriber {
         fetch_models:            'Fetch',
         model_select:            'Model',
         model_default:           '— use server default —',
+        provider_profile:        'Provider profile',
+        profile_name:            'Profile name',
+        temperature:             'Temperature',
+        profile_saved:           'Profile saved',
+        profile_delete_confirm:  'Delete this provider profile?',
         summary_language:        'Summary Language',
         processing_progress:     'Processing',
         preparing:               'Preparing…',
@@ -79,6 +84,11 @@ class VideoTranscriber {
         fetch_models:            '获取',
         model_select:            '模型',
         model_default:           '— 使用服务器默认 —',
+        provider_profile:        '供应商配置',
+        profile_name:            '配置名称',
+        temperature:             'Temperature',
+        profile_saved:           '配置已保存',
+        profile_delete_confirm:  '确定删除当前供应商配置吗？',
         summary_language:        '摘要语言',
         processing_progress:     '处理进度',
         preparing:               '准备中…',
@@ -155,9 +165,16 @@ class VideoTranscriber {
     this.settingsBody       = document.getElementById('settingsBody');
     this.modelBaseUrl       = document.getElementById('modelBaseUrl');
     this.apiKeyInput        = document.getElementById('apiKeyInput');
+    this.providerProfileSelect = document.getElementById('providerProfileSelect');
+    this.addProfileBtn      = document.getElementById('addProfileBtn');
+    this.saveProfileBtn     = document.getElementById('saveProfileBtn');
+    this.deleteProfileBtn   = document.getElementById('deleteProfileBtn');
+    this.profileNameRow     = document.getElementById('profileNameRow');
+    this.profileNameInput   = document.getElementById('profileNameInput');
     this.fetchModelsBtn     = document.getElementById('fetchModelsBtn');
     this.fetchStatus        = document.getElementById('fetchStatus');
     this.modelSelect        = document.getElementById('modelSelect');
+    this.temperatureInput   = document.getElementById('temperatureInput');
     this.fetchIcon          = document.getElementById('fetchIcon');
     this.uploadZone         = document.getElementById('uploadZone');
     this.uploadPickBtn      = document.getElementById('uploadPickBtn');
@@ -182,6 +199,13 @@ class VideoTranscriber {
 
     // Fetch models
     this.fetchModelsBtn.addEventListener('click', () => this._fetchModels());
+    this.addProfileBtn.addEventListener('click', () => this._beginAddProfile());
+    this.saveProfileBtn.addEventListener('click', () => this._saveActiveProfile());
+    this.deleteProfileBtn.addEventListener('click', () => this._deleteActiveProfile());
+    this.providerProfileSelect.addEventListener('change', () => {
+      this._captureActiveProfile();
+      this._applyProfile(this.providerProfileSelect.value);
+    });
 
     // Auto-fetch when both fields filled (debounced)
     const debouncedFetch = this._debounce(() => {
@@ -191,9 +215,14 @@ class VideoTranscriber {
     this.apiKeyInput.addEventListener('input', debouncedFetch);
 
     // Persist settings
-    [this.modelBaseUrl, this.apiKeyInput, this.modelSelect, this.summaryLangSel].forEach(el => {
+    [this.modelBaseUrl, this.apiKeyInput, this.summaryLangSel].forEach(el => {
       el.addEventListener('change', () => this._saveSettings());
     });
+    this.modelSelect.addEventListener('change', () => {
+      this._restoreModelTemperature();
+      this._saveSettings();
+    });
+    this.temperatureInput.addEventListener('change', () => this._saveSettings());
 
     // Tabs
     this.tabBtns.forEach(btn => {
@@ -266,37 +295,121 @@ class VideoTranscriber {
   }
 
   /* ── Settings persistence ─────────────────────────────── */
+  _getActiveProfile() {
+    return this.settings?.profiles.find(profile => profile.id === this.settings.activeProfileId) || null;
+  }
+
+  _writeSettings() {
+    try { localStorage.setItem('vt_settings', JSON.stringify(this.settings)); } catch (_) {}
+  }
+
+  _captureActiveProfile() {
+    const profile = this._getActiveProfile();
+    if (!profile) return;
+    let updated = window.AIProfileStore.captureProfile(profile, {
+      baseUrl: this.modelBaseUrl.value,
+      apiKey: this.apiKeyInput.value,
+      modelId: this.modelSelect.value,
+    });
+    if (updated.lastModel) {
+      updated = window.AIProfileStore.setModelTemperature(
+        updated,
+        updated.lastModel,
+        this.temperatureInput.value,
+      );
+    }
+    const index = this.settings.profiles.findIndex(item => item.id === profile.id);
+    this.settings.profiles[index] = updated;
+    this.settings.summaryLang = this.summaryLangSel.value;
+  }
+
+  _renderProfileOptions() {
+    this.providerProfileSelect.innerHTML = '';
+    this.settings.profiles.forEach(profile => {
+      const option = document.createElement('option');
+      option.value = profile.id;
+      option.textContent = profile.name;
+      this.providerProfileSelect.appendChild(option);
+    });
+    this.providerProfileSelect.value = this.settings.activeProfileId;
+  }
+
+  _applyProfile(profileId, { fetchModels = true } = {}) {
+    const profile = this.settings.profiles.find(item => item.id === profileId) || this.settings.profiles[0];
+    if (!profile) return;
+    this.settings.activeProfileId = profile.id;
+    this._renderProfileOptions();
+    this.modelBaseUrl.value = profile.baseUrl;
+    this.apiKeyInput.value = profile.apiKey;
+    this.modelSelect.innerHTML = `<option value="">${this.t('model_default')}</option>`;
+    this._savedModel = profile.lastModel || '';
+    this.temperatureInput.value = window.AIProfileStore.temperatureFor(profile, profile.lastModel);
+    this._setFetchStatus('', '');
+    this._writeSettings();
+
+    if (profile.baseUrl || profile.apiKey) {
+      this.settingsBody.classList.add('open');
+      this.settingsToggle.classList.add('open');
+    }
+    if (fetchModels && profile.baseUrl && profile.apiKey) {
+      setTimeout(() => this._fetchModels(true), 0);
+    }
+  }
+
+  _beginAddProfile() {
+    this._captureActiveProfile();
+    const profile = window.AIProfileStore.createProfile('New provider');
+    this.settings.profiles.push(profile);
+    this.settings.activeProfileId = profile.id;
+    this._applyProfile(profile.id, { fetchModels: false });
+    this.profileNameInput.value = '';
+    this.profileNameRow.hidden = false;
+    this.profileNameInput.focus();
+  }
+
+  _saveActiveProfile() {
+    this._captureActiveProfile();
+    const profile = this._getActiveProfile();
+    const enteredName = this.profileNameInput.value.trim();
+    if (profile && enteredName) profile.name = enteredName;
+    this.profileNameRow.hidden = true;
+    this.profileNameInput.value = '';
+    this._renderProfileOptions();
+    this._writeSettings();
+    this._setFetchStatus('ok', this.t('profile_saved'));
+  }
+
+  _deleteActiveProfile() {
+    if (!window.confirm(this.t('profile_delete_confirm'))) return;
+    const activeId = this.settings.activeProfileId;
+    this.settings.profiles = this.settings.profiles.filter(profile => profile.id !== activeId);
+    if (!this.settings.profiles.length) {
+      this.settings.profiles.push(window.AIProfileStore.createProfile('Default'));
+    }
+    this.profileNameRow.hidden = true;
+    this._applyProfile(this.settings.profiles[0].id);
+  }
+
+  _restoreModelTemperature() {
+    const profile = this._getActiveProfile();
+    this.temperatureInput.value = window.AIProfileStore.temperatureFor(
+      profile,
+      this.modelSelect.value,
+    );
+  }
+
   _saveSettings() {
-    const s = {
-      baseUrl:  this.modelBaseUrl.value,
-      apiKey:   this.apiKeyInput.value,
-      model:    this.modelSelect.value,
-      summaryLang: this.summaryLangSel.value,
-    };
-    try { localStorage.setItem('vt_settings', JSON.stringify(s)); } catch (_) {}
+    this._captureActiveProfile();
+    this._writeSettings();
   }
 
   _loadSettings() {
-    try {
-      const raw = localStorage.getItem('vt_settings');
-      if (!raw) return;
-      const s = JSON.parse(raw);
-      if (s.baseUrl)     this.modelBaseUrl.value = s.baseUrl;
-      if (s.apiKey)      this.apiKeyInput.value  = s.apiKey;
-      if (s.summaryLang) this.summaryLangSel.value = s.summaryLang;
-      // Model options will be restored after fetching
-      this._savedModel = s.model || '';
-
-      // Auto-open settings if credentials were saved
-      if (s.baseUrl || s.apiKey) {
-        this.settingsBody.classList.add('open');
-        this.settingsToggle.classList.add('open');
-        // Attempt to re-fetch model list silently
-        if (s.baseUrl && s.apiKey) {
-          setTimeout(() => this._fetchModels(true), 400);
-        }
-      }
-    } catch (_) {}
+    const raw = localStorage.getItem('vt_settings');
+    this.settings = window.AIProfileStore.load(raw);
+    this.summaryLangSel.value = this.settings.summaryLang;
+    this._renderProfileOptions();
+    this._applyProfile(this.settings.activeProfileId);
+    this._writeSettings();
   }
 
   /* ── Fetch models ─────────────────────────────────────── */
@@ -337,9 +450,17 @@ class VideoTranscriber {
 
       // Restore previously selected model
       if (this._savedModel) {
+        if (![...this.modelSelect.options].some(option => option.value === this._savedModel)) {
+          const savedOption = document.createElement('option');
+          savedOption.value = this._savedModel;
+          savedOption.textContent = this._savedModel;
+          this.modelSelect.appendChild(savedOption);
+        }
         this.modelSelect.value = this._savedModel;
         this._savedModel = '';
       }
+      this._restoreModelTemperature();
+      this._saveSettings();
 
       this._setFetchStatus('ok', typeof this.t('models_loaded') === 'function'
         ? this.t('models_loaded')(models.length)
@@ -383,6 +504,7 @@ class VideoTranscriber {
       if (apiKey)  fd.append('api_key',       apiKey);
       if (baseUrl) fd.append('model_base_url', baseUrl);
       if (modelId) fd.append('model_id',       modelId);
+      fd.append('temperature', this.temperatureInput.value || '0.1');
 
       const resp = await fetch(`${this.apiBase}/process-video`, { method: 'POST', body: fd });
       if (!resp.ok) {
@@ -440,6 +562,7 @@ class VideoTranscriber {
       if (apiKey)  fd.append('api_key',       apiKey);
       if (baseUrl) fd.append('model_base_url', baseUrl);
       if (modelId) fd.append('model_id',       modelId);
+      fd.append('temperature', this.temperatureInput.value || '0.1');
 
       const resp = await fetch(`${this.apiBase}/process-video`, { method: 'POST', body: fd });
       if (!resp.ok) {
