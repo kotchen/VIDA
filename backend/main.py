@@ -17,6 +17,7 @@ from video_processor import VideoProcessor
 from transcriber import Transcriber
 from summarizer import Summarizer
 from translator import Translator
+from model_settings import validate_temperature
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -109,6 +110,29 @@ UPLOAD_ALLOWED_EXT = frozenset({".txt", ".mp3", ".mp4", ".m4a", ".wav", ".webm",
 UPLOAD_MAX_MB = int(os.getenv("UPLOAD_MAX_MB", "200"))
 
 
+def _temperature_or_400(value) -> float:
+    try:
+        return validate_temperature(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _create_request_ai_services(
+    api_key: str = "",
+    model_base_url: str = "",
+    model_id: str = "",
+    temperature: float = 0.1,
+):
+    validated_temperature = validate_temperature(temperature)
+    kwargs = {
+        "api_key": (api_key or "").strip() or None,
+        "base_url": (model_base_url or "").strip().rstrip("/") or None,
+        "model": (model_id or "").strip() or None,
+        "temperature": validated_temperature,
+    }
+    return Summarizer(**kwargs), Translator(**kwargs)
+
+
 def _sanitize_title_for_filename(title: str) -> str:
     """将视频标题清洗为安全的文件名片段。"""
     if not title:
@@ -143,10 +167,8 @@ async def _run_post_extract_pipeline(
     source_ref: str,
     summary_language: str,
     request_summarizer: Summarizer,
+    request_translator: Translator,
     dedup_url: Optional[str] = None,
-    api_key: str = "",
-    model_base_url: str = "",
-    model_id: str = "",
 ) -> None:
     """取得 raw_script 后的共用管线：归档、优化、翻译、摘要、广播。"""
     short_id = task_id.replace("-", "")[:6]
@@ -177,8 +199,8 @@ async def _run_post_extract_pipeline(
     detected_language = transcriber.get_detected_language(raw_script)
     detected_language = (detected_language or "").strip()
     if not detected_language:
-        detected_language = translator.infer_language_code(raw_script)
-    detected_language = translator.normalize_lang_code(detected_language) or detected_language
+        detected_language = request_translator.infer_language_code(raw_script)
+    detected_language = request_translator.normalize_lang_code(detected_language) or detected_language
 
     logger.info(f"检测到的语言: {detected_language}, 摘要语言: {summary_language}")
 
@@ -186,18 +208,7 @@ async def _run_post_extract_pipeline(
     translation_filename = None
     translation_path = None
 
-    eff_key = (api_key or "").strip()
-    eff_base = (model_base_url or "").strip().rstrip("/")
-    if eff_key:
-        request_translator = Translator(
-            api_key=eff_key,
-            base_url=eff_base or None,
-            model=model_id or None,
-        )
-    else:
-        request_translator = translator
-
-    need_translation = translator.languages_differ_for_translation(
+    need_translation = request_translator.languages_differ_for_translation(
         detected_language, summary_language
     )
 
@@ -321,6 +332,7 @@ async def _enqueue_upload_job(
     api_key: str,
     model_base_url: str,
     model_id: str,
+    temperature: float,
 ) -> dict:
     """保存上传文件并入队 process_upload_task，返回 {task_id, message}。"""
     raw_name = file.filename or "upload.bin"
@@ -389,6 +401,7 @@ async def _enqueue_upload_job(
             api_key,
             model_base_url,
             model_id,
+            temperature,
         )
     )
     active_tasks[task_id] = bg
@@ -403,6 +416,7 @@ async def process_video(
     api_key: str = Form(default=""),
     model_base_url: str = Form(default=""),
     model_id: str = Form(default=""),
+    temperature: str = Form(default="0.1"),
     file: Optional[UploadFile] = File(None),
 ):
     """
@@ -410,9 +424,15 @@ async def process_video(
     上传与 URL 共用此路径，便于反向代理只放行 /api/process-video 的环境。
     """
     try:
+        validated_temperature = _temperature_or_400(temperature)
         if file is not None and (file.filename or "").strip():
             return await _enqueue_upload_job(
-                file, summary_language, api_key, model_base_url, model_id
+                file,
+                summary_language,
+                api_key,
+                model_base_url,
+                model_id,
+                validated_temperature,
             )
 
         stripped = (url or "").strip()
@@ -450,7 +470,17 @@ async def process_video(
         save_tasks(tasks)
         
         # 创建并跟踪异步任务
-        task = asyncio.create_task(process_video_task(task_id, url, summary_language, api_key, model_base_url, model_id))
+        task = asyncio.create_task(
+            process_video_task(
+                task_id,
+                url,
+                summary_language,
+                api_key,
+                model_base_url,
+                model_id,
+                validated_temperature,
+            )
+        )
         active_tasks[task_id] = task
         
         return {"task_id": task_id, "message": "任务已创建，正在处理中..."}
@@ -468,6 +498,7 @@ async def process_video_task(
     api_key: str = "",
     model_base_url: str = "",
     model_id: str = "",
+    temperature: float = 0.1,
 ):
     """
     异步处理视频任务
@@ -483,17 +514,18 @@ async def process_video_task(
         await broadcast_task_update(task_id, tasks[task_id])
         await asyncio.sleep(0.1)
 
-        # 如果前端传入了 API 凭据，创建专用 Summarizer（线程安全，覆盖全局实例）
-        if api_key:
-            effective_url = model_base_url.rstrip("/") or None
-            request_summarizer = Summarizer(
-                api_key=api_key,
-                base_url=effective_url,
-                model=model_id or None,
-            )
-            logger.info(f"使用前端提供的 API Key，base_url={effective_url}, model={model_id or 'default'}")
-        else:
-            request_summarizer = summarizer  # 全局实例（使用环境变量）
+        request_summarizer, request_translator = _create_request_ai_services(
+            api_key,
+            model_base_url,
+            model_id,
+            temperature,
+        )
+        logger.info(
+            "Created request-scoped AI services: base_url=%s, model=%s, temperature=%s",
+            model_base_url.rstrip("/") or "environment default",
+            model_id or "default",
+            temperature,
+        )
 
         subtitle_text, sub_title, sub_lang = await video_processor.fetch_subtitles(url, TEMP_DIR)
 
@@ -546,10 +578,8 @@ async def process_video_task(
             source_ref=url,
             summary_language=summary_language,
             request_summarizer=request_summarizer,
+            request_translator=request_translator,
             dedup_url=url,
-            api_key=api_key,
-            model_base_url=model_base_url,
-            model_id=model_id,
         )
 
         # 不要立即删除临时文件！保留给用户下载
@@ -579,10 +609,16 @@ async def process_upload(
     api_key: str = Form(default=""),
     model_base_url: str = Form(default=""),
     model_id: str = Form(default=""),
+    temperature: str = Form(default="0.1"),
 ):
     """独立上传入口；逻辑与 multipart 带 file 的 /api/process-video 相同。"""
     return await _enqueue_upload_job(
-        file, summary_language, api_key, model_base_url, model_id
+        file,
+        summary_language,
+        api_key,
+        model_base_url,
+        model_id,
+        _temperature_or_400(temperature),
     )
 
 
@@ -596,21 +632,22 @@ async def process_upload_task(
     api_key: str = "",
     model_base_url: str = "",
     model_id: str = "",
+    temperature: float = 0.1,
 ):
     source_ref = f"upload:{original_name}"
     try:
-        if api_key:
-            effective_url = model_base_url.rstrip("/") or None
-            request_summarizer = Summarizer(
-                api_key=api_key,
-                base_url=effective_url,
-                model=model_id or None,
-            )
-            logger.info(
-                f"上传任务使用前端 API Key，base_url={effective_url}, model={model_id or 'default'}"
-            )
-        else:
-            request_summarizer = summarizer
+        request_summarizer, request_translator = _create_request_ai_services(
+            api_key,
+            model_base_url,
+            model_id,
+            temperature,
+        )
+        logger.info(
+            "Created upload AI services: base_url=%s, model=%s, temperature=%s",
+            model_base_url.rstrip("/") or "environment default",
+            model_id or "default",
+            temperature,
+        )
 
         if ext_lower == ".txt":
             tasks[task_id].update({
@@ -658,10 +695,8 @@ async def process_upload_task(
             source_ref=source_ref,
             summary_language=summary_language,
             request_summarizer=request_summarizer,
+            request_translator=request_translator,
             dedup_url=None,
-            api_key=api_key,
-            model_base_url=model_base_url,
-            model_id=model_id,
         )
 
     except Exception as e:
