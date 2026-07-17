@@ -85,6 +85,16 @@ class VideoTranscriber {
         kind_translation:        'Translation',
         kind_summary:            'Summary',
         kind_other:              'File',
+        stage_detect:            'Detect subtitles',
+        stage_subtitle:          'Fetch subtitles',
+        stage_download:          'Download audio',
+        stage_transcribe:        'Transcribe audio',
+        stage_optimize:          'Optimize text',
+        stage_translate:         'Translate text',
+        stage_summary:           'Generate summary',
+        fetching_subtitles:      'Fetching subtitles…',
+        generating_translation:  'Generating translation…',
+        dag_done:                'Done',
       },
       zh: {
         title:                   'AI 视频转录器',
@@ -155,6 +165,16 @@ class VideoTranscriber {
         kind_translation:        '翻译',
         kind_summary:            '摘要',
         kind_other:              '文件',
+        stage_detect:            '检测字幕',
+        stage_subtitle:          '获取字幕',
+        stage_download:          '下载音频',
+        stage_transcribe:        '转录音频',
+        stage_optimize:          '优化文本',
+        stage_translate:         '翻译文本',
+        stage_summary:           '生成摘要',
+        fetching_subtitles:      '正在获取字幕…',
+        generating_translation:  '正在生成翻译…',
+        dag_done:                '完成',
       }
     };
 
@@ -180,7 +200,7 @@ class VideoTranscriber {
     this.modeBadge          = document.getElementById('modeBadge');
     this.progressStatus     = document.getElementById('progressStatus');
     this.progressFill       = document.getElementById('progressFill');
-    this.progressMessage    = document.getElementById('progressMessage');
+    this.dagList            = document.getElementById('dagList');
     this.resultsPanel       = document.getElementById('resultsPanel');
     this.scriptContent      = document.getElementById('scriptContent');
     this.summaryContent     = document.getElementById('summaryContent');
@@ -776,6 +796,16 @@ class VideoTranscriber {
     else if (m.includes('完成') || m.includes('complet'))                  { this.sp.stage = 'completed';     this.sp.target = 100; }
 
     if (pct >= this.sp.target) this.sp.target = Math.min(pct + 8, 99);
+
+    // ── DAG 路径与条件阶段识别 ──────────────────────────────
+    if (m.includes('获取成功') || m.includes('subtitle found') || m.includes('字幕获取')) {
+      this._setDagPath('subtitle');
+    } else if (m.includes('未找到字幕') || m.includes('no subtitle') || m.includes('下载') || m.includes('download')) {
+      this._setDagPath('whisper');
+    }
+    if (m.includes('翻译') || m.includes('translat')) {
+      this._setDagTranslate(true);
+    }
   }
 
   _setModeBadge(mode) {
@@ -837,24 +867,137 @@ class VideoTranscriber {
     const p = Math.round(pct * 10) / 10;
     this.progressStatus.textContent = `${p}%`;
     this.progressFill.style.width   = `${p}%`;
+    this._renderDag(pct);
+  }
 
-    // Translate common server messages — more specific checks first
-    const m = (msg || '').toLowerCase();
-    let label = msg;
-    // ── Subtitle path ──────────────────────────────────────────
-    if      (m.includes('获取成功') || m.includes('subtitle found'))        label = this.t('subtitle_found');
-    else if (m.includes('未找到字幕') || m.includes('no subtitle'))         label = this.t('no_subtitle');
-    else if (m.includes('检测') && (m.includes('字幕') || m.includes('subtitle'))) label = this.t('detecting_subtitles');
-    // ── Audio / Whisper path ────────────────────────────────────
-    else if (m.includes('下载') || m.includes('download'))  label = this.t('downloading_video');
-    else if (m.includes('解析') || m.includes('pars'))      label = this.t('parsing_video');
-    else if (m.includes('转录') || m.includes('transcrib')) label = this.t('transcribing_audio');
-    else if (m.includes('优化') || m.includes('optimiz'))   label = this.t('optimizing_transcript');
-    else if (m.includes('摘要') || m.includes('summary'))   label = this.t('generating_summary');
-    else if (m.includes('完成') || m.includes('complet'))   label = this.t('completed');
-    else if (m.includes('准备') || m.includes('prepar'))    label = this.t('preparing');
+  /* ── Pipeline DAG (stage stepper) ─────────────────────── */
+  _dagIcons() {
+    return {
+      check: '<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 5"/></svg>',
+      spinner: '<svg class="ico spinning" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M8 2a6 6 0 1 1-5.2 3"/></svg>',
+    };
+  }
 
-    this.progressMessage.textContent = label;
+  _initDag() {
+    this.dag = { path: 'whisper', translate: false, built: '', stages: [] };
+    this._rebuildDag();
+    this._renderDag(0);
+  }
+
+  _dagStageDefs() {
+    const defs = [{ id: 'detect', start: 0, end: 15, kind: 'indet' }];
+    if (this.dag.path === 'subtitle') {
+      defs.push({ id: 'subtitle', start: 15, end: 55, kind: 'indet' });
+    } else {
+      defs.push({ id: 'download', start: 15, end: 40, kind: 'bar' });
+      defs.push({ id: 'transcribe', start: 40, end: 55, kind: 'bar' });
+    }
+    const t = this.dag.translate;
+    defs.push({ id: 'optimize', start: 55, end: t ? 70 : 80, kind: 'indet' });
+    if (t) defs.push({ id: 'translate', start: 70, end: 80, kind: 'indet' });
+    defs.push({ id: 'summary', start: 80, end: 99, kind: 'indet' });
+    return defs;
+  }
+
+  _rebuildDag() {
+    if (!this.dagList) return;
+    const key = `${this.dag.path}|${this.dag.translate}`;
+    if (this.dag.built === key) return;
+    this.dag.built = key;
+    this.dag.stages = this._dagStageDefs();
+    this.dagList.innerHTML = '';
+    this.dag.stages.forEach(s => {
+      const node = document.createElement('div');
+      node.className = 'dag-node';
+      node.innerHTML = `
+        <div class="dag-rail">
+          <div class="dag-dot"></div>
+          <div class="dag-line"></div>
+        </div>
+        <div class="dag-body">
+          <div class="dag-head">
+            <span class="dag-label">${this._esc(this.t('stage_' + s.id))}</span>
+            <span class="dag-status"></span>
+          </div>
+          <div class="dag-bar${s.kind === 'indet' ? ' indet' : ''}" style="display:none;">
+            <div class="dag-bar-fill"></div>
+          </div>
+        </div>`;
+      this.dagList.appendChild(node);
+      s.el = {
+        node,
+        dot: node.querySelector('.dag-dot'),
+        status: node.querySelector('.dag-status'),
+        bar: node.querySelector('.dag-bar'),
+        fill: node.querySelector('.dag-bar-fill'),
+      };
+      s.state = 'pending';
+    });
+  }
+
+  _dagDoing(id) {
+    const map = {
+      detect: 'detecting_subtitles',
+      subtitle: 'fetching_subtitles',
+      download: 'downloading_video',
+      transcribe: 'transcribing_audio',
+      optimize: 'optimizing_transcript',
+      translate: 'generating_translation',
+      summary: 'generating_summary',
+    };
+    return this.t(map[id]) || '';
+  }
+
+  _setDagPath(path) {
+    if (!this.dag || this.dag.path === path) return;
+    this.dag.path = path;
+    this._rebuildDag();
+    this._renderDag(this.sp.current);
+  }
+
+  _setDagTranslate(on) {
+    if (!this.dag || this.dag.translate === on) return;
+    this.dag.translate = on;
+    this._rebuildDag();
+    this._renderDag(this.sp.current);
+  }
+
+  _renderDag(pct) {
+    if (!this.dag || !this.dag.stages.length) return;
+    const icons = this._dagIcons();
+    const complete = pct >= 99.5;
+    let activeIdx = this.dag.stages.findIndex(s => pct < s.end);
+    if (activeIdx === -1) activeIdx = this.dag.stages.length - 1;
+
+    this.dag.stages.forEach((s, i) => {
+      const done = complete || pct >= s.end;
+      const active = !done && i === activeIdx;
+      const state = done ? 'done' : active ? 'active' : 'pending';
+
+      if (s.state !== state) {
+        s.state = state;
+        s.el.node.classList.remove('done', 'active');
+        if (state !== 'pending') s.el.node.classList.add(state);
+        s.el.dot.innerHTML = state === 'done' ? icons.check : state === 'active' ? icons.spinner : '';
+      }
+
+      if (done) {
+        s.el.status.textContent = this.t('dag_done');
+      } else if (active && s.kind === 'bar') {
+        const p = Math.max(0, Math.min(100, ((pct - s.start) / (s.end - s.start)) * 100));
+        s.el.status.textContent = `${this._dagDoing(s.id)} ${Math.round(p)}%`;
+      } else if (active) {
+        s.el.status.textContent = this._dagDoing(s.id);
+      } else {
+        s.el.status.textContent = '';
+      }
+
+      s.el.bar.style.display = state === 'pending' ? 'none' : '';
+      if (s.kind === 'bar') {
+        const p = done ? 100 : Math.max(0, Math.min(100, ((pct - s.start) / (s.end - s.start)) * 100));
+        s.el.fill.style.width = `${p}%`;
+      }
+    });
   }
 
   _showProgress() {
@@ -864,6 +1007,7 @@ class VideoTranscriber {
     // Reset mode badge & progress bar color for new task
     if (this.modeBadge) { this.modeBadge.style.display = 'none'; this.modeBadge.className = 'mode-badge'; }
     if (this.progressFill) this.progressFill.classList.remove('subtitle-mode');
+    this._initDag();
   }
   _hideProgress() { this.progressPanel.classList.remove('show'); }
 

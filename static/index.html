@@ -502,6 +502,119 @@
     }
     .prog-msg { font-size: 12px; color: var(--text-dim); font-style: italic; }
 
+    /* ── Pipeline DAG (stage stepper) ────────────────────── */
+    .dag { margin-top: 16px; display: flex; flex-direction: column; }
+    .dag-node {
+      display: flex;
+      gap: 12px;
+      padding-bottom: 13px;
+    }
+    .dag-node:last-child { padding-bottom: 0; }
+    .dag-rail {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: 22px;
+      flex-shrink: 0;
+    }
+    .dag-dot {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      border: 1.5px solid var(--border-light);
+      background: var(--surface-2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-dim);
+      position: relative;
+      z-index: 1;
+      transition: border-color .3s, background .3s, color .3s;
+    }
+    .dag-dot .ico { width: 11px; height: 11px; }
+    .dag-line {
+      flex: 1;
+      width: 1.5px;
+      min-height: 10px;
+      margin: 2px 0;
+      background: var(--border-light);
+      transition: background .3s;
+    }
+    .dag-node:last-child .dag-line { display: none; }
+    .dag-node.done .dag-dot {
+      border-color: var(--success);
+      background: rgba(106,184,122,.12);
+      color: var(--success);
+    }
+    .dag-node.done .dag-line { background: rgba(106,184,122,.45); }
+    .dag-node.active .dag-dot {
+      border-color: var(--accent);
+      background: rgba(192,120,48,.12);
+      color: var(--accent-text);
+    }
+    .dag-node.active .dag-dot::after {
+      content: '';
+      position: absolute;
+      inset: -4px;
+      border-radius: 50%;
+      border: 1.5px solid var(--accent);
+      animation: dagPulse 1.6s ease-out infinite;
+    }
+    @keyframes dagPulse {
+      0%   { transform: scale(.8);  opacity: .65; }
+      100% { transform: scale(1.4); opacity: 0; }
+    }
+    .dag-body { flex: 1; min-width: 0; padding-top: 2px; }
+    .dag-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .dag-label {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--text-dim);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      transition: color .3s;
+    }
+    .dag-node.active .dag-label { color: var(--text); }
+    .dag-node.done   .dag-label { color: var(--text-muted); }
+    .dag-status {
+      font-size: 11px;
+      color: var(--text-dim);
+      flex-shrink: 0;
+      transition: color .3s;
+    }
+    .dag-node.active .dag-status { color: var(--accent-text); }
+    .dag-node.done   .dag-status { color: rgba(106,184,122,.85); }
+    .dag-bar {
+      margin-top: 7px;
+      height: 4px;
+      border-radius: 4px;
+      background: var(--surface-3);
+      overflow: hidden;
+    }
+    .dag-bar-fill {
+      height: 100%;
+      width: 0%;
+      border-radius: 4px;
+      background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+      transition: width .45s ease;
+    }
+    .dag-bar.indet .dag-bar-fill {
+      width: 32%;
+      transition: none;
+      animation: dagSlide 1.15s ease-in-out infinite;
+    }
+    @keyframes dagSlide {
+      0%   { margin-left: -32%; }
+      100% { margin-left: 100%; }
+    }
+    .dag-node.done .dag-bar-fill { width: 100% !important; animation: none; background: rgba(106,184,122,.55); }
+
     /* results */
     .results-panel { display: none; }
     .results-panel.show { display: block; }
@@ -994,7 +1107,7 @@
       <div class="prog-bar">
         <div class="prog-fill" id="progressFill"></div>
       </div>
-      <div class="prog-msg" id="progressMessage" data-i18n="preparing">Preparing…</div>
+      <div class="dag" id="dagList"></div>
     </div>
 
     <!-- Results -->
