@@ -337,12 +337,12 @@ class VideoTranscriber {
   _applyProfile(profileId, { fetchModels = true } = {}) {
     const profile = this.settings.profiles.find(item => item.id === profileId) || this.settings.profiles[0];
     if (!profile) return;
+    this._modelFetchToken = (this._modelFetchToken || 0) + 1;
     this.settings.activeProfileId = profile.id;
     this._renderProfileOptions();
     this.modelBaseUrl.value = profile.baseUrl;
     this.apiKeyInput.value = profile.apiKey;
     this.modelSelect.innerHTML = `<option value="">${this.t('model_default')}</option>`;
-    this._savedModel = profile.lastModel || '';
     this.temperatureInput.value = window.AIProfileStore.temperatureFor(profile, profile.lastModel);
     this._setFetchStatus('', '');
     this._writeSettings();
@@ -414,6 +414,8 @@ class VideoTranscriber {
 
   /* ── Fetch models ─────────────────────────────────────── */
   async _fetchModels(silent = false) {
+    const fetchToken = ++this._modelFetchToken;
+    const profileId = this.settings.activeProfileId;
     const baseUrl = this.modelBaseUrl.value.trim().replace(/\/$/, '');
     const apiKey  = this.apiKeyInput.value.trim();
 
@@ -432,12 +434,14 @@ class VideoTranscriber {
       fd.append('api_key',  apiKey);
 
       const resp = await fetch(`${this.apiBase}/models`, { method: 'POST', body: fd });
+      if (fetchToken !== this._modelFetchToken || profileId !== this.settings.activeProfileId) return;
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
         throw new Error(err.detail || `HTTP ${resp.status}`);
       }
       const data = await resp.json();
       const models = data.data || data.models || [];
+      const savedModel = this._getActiveProfile()?.lastModel || '';
 
       // Rebuild select options
       this.modelSelect.innerHTML = `<option value="">${this.t('model_default')}</option>`;
@@ -449,15 +453,14 @@ class VideoTranscriber {
       });
 
       // Restore previously selected model
-      if (this._savedModel) {
-        if (![...this.modelSelect.options].some(option => option.value === this._savedModel)) {
+      if (savedModel) {
+        if (![...this.modelSelect.options].some(option => option.value === savedModel)) {
           const savedOption = document.createElement('option');
-          savedOption.value = this._savedModel;
-          savedOption.textContent = this._savedModel;
+          savedOption.value = savedModel;
+          savedOption.textContent = savedModel;
           this.modelSelect.appendChild(savedOption);
         }
-        this.modelSelect.value = this._savedModel;
-        this._savedModel = '';
+        this.modelSelect.value = savedModel;
       }
       this._restoreModelTemperature();
       this._saveSettings();
@@ -467,11 +470,14 @@ class VideoTranscriber {
         : `${models.length} models`);
 
     } catch (e) {
+      if (fetchToken !== this._modelFetchToken || profileId !== this.settings.activeProfileId) return;
       console.warn('Model fetch error:', e);
       this._setFetchStatus('err', this.t('models_error') + ': ' + e.message);
     } finally {
-      this.fetchModelsBtn.disabled = false;
-      this.fetchIcon.className = 'fas fa-sync-alt';
+      if (fetchToken === this._modelFetchToken) {
+        this.fetchModelsBtn.disabled = false;
+        this.fetchIcon.className = 'fas fa-sync-alt';
+      }
     }
   }
 

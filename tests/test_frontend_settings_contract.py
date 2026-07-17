@@ -46,6 +46,11 @@ class FrontendSettingsContractTests(unittest.TestCase):
     def test_url_and_upload_requests_include_temperature(self):
         self.assertGreaterEqual(self.app_js.count("fd.append('temperature'"), 2)
 
+    def test_model_fetches_ignore_stale_profile_responses(self):
+        self.assertIn("const fetchToken = ++this._modelFetchToken", self.app_js)
+        self.assertIn("fetchToken !== this._modelFetchToken", self.app_js)
+        self.assertNotIn("this._savedModel", self.app_js)
+
 
 if __name__ == "__main__":
     unittest.main()
