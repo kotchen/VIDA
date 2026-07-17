@@ -326,6 +326,9 @@
       transition: border-color .2s, color .2s, background .2s;
     }
     .btn-profile:hover { border-color: var(--accent-dim); color: var(--accent-text); }
+    .btn-profile:active { transform: translateY(1px); }
+    .btn-profile:focus-visible { outline: 2px solid var(--accent-dim); outline-offset: 1px; }
+    .btn-profile svg { width: 15px; height: 15px; flex-shrink: 0; }
     .btn-profile.danger:hover { border-color: rgba(224,120,120,.45); color: var(--error); }
     .btn-profile[data-tooltip]::after {
       content: attr(data-tooltip);
@@ -697,13 +700,24 @@
             <select id="providerProfileSelect" class="s-select"></select>
             <div class="profile-actions">
               <button type="button" id="addProfileBtn" class="btn-profile" aria-label="Add provider profile" data-tooltip="Add profile">
-                <i class="fas fa-plus" aria-hidden="true"></i>
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+                  <path d="M8 3v10M3 8h10"/>
+                </svg>
               </button>
               <button type="button" id="saveProfileBtn" class="btn-profile" aria-label="Save provider profile" data-tooltip="Save profile">
-                <i class="fas fa-save" aria-hidden="true"></i>
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M2.5 2.5h8L13.5 5.5v8h-11z"/>
+                  <path d="M5 2.5V6h5V2.5"/>
+                  <path d="M4.5 13.5V9.5h7v4"/>
+                </svg>
               </button>
               <button type="button" id="deleteProfileBtn" class="btn-profile danger" aria-label="Delete provider profile" data-tooltip="Delete profile">
-                <i class="fas fa-trash-alt" aria-hidden="true"></i>
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M2.5 4h11"/>
+                  <path d="M6.5 4V2.5h3V4"/>
+                  <path d="M4 4l.7 9.5h6.6L12 4"/>
+                  <path d="M6.7 6.8v4M9.3 6.8v4"/>
+                </svg>
               </button>
             </div>
           </div>
