@@ -70,6 +70,21 @@ class VideoTranscriber {
         error_upload_type:       'Unsupported file type',
         error_upload_empty:      'File is empty',
         error_upload_size:       (mb) => `File exceeds ${mb} MB limit`,
+        library_title:           'Generated Files',
+        library_empty:           'No generated files yet — run a transcription first.',
+        library_refresh:         'Refresh',
+        library_download:        'Download',
+        library_close:           'Close',
+        library_delete:          'Delete',
+        library_ungrouped:       'Ungrouped (legacy)',
+        library_files_count:     (n) => `${n} file${n > 1 ? 's' : ''}`,
+        library_delete_file_confirm:  'Delete this file?',
+        library_delete_group_confirm: 'Delete this folder and all its files?',
+        kind_raw:                'Raw',
+        kind_transcript:         'Transcript',
+        kind_translation:        'Translation',
+        kind_summary:            'Summary',
+        kind_other:              'File',
       },
       zh: {
         title:                   'AI 视频转录器',
@@ -125,12 +140,28 @@ class VideoTranscriber {
         error_upload_type:       '不支持的文件类型',
         error_upload_empty:      '文件为空',
         error_upload_size:       (mb) => `文件超过 ${mb} MB 限制`,
+        library_title:           '生成文件',
+        library_empty:           '还没有生成文件 — 先运行一次转录吧。',
+        library_refresh:         '刷新',
+        library_download:        '下载',
+        library_close:           '关闭',
+        library_delete:          '删除',
+        library_ungrouped:       '未分组（旧版）',
+        library_files_count:     (n) => `${n} 个文件`,
+        library_delete_file_confirm:  '确定删除这个文件吗？',
+        library_delete_group_confirm: '确定删除整个文件夹及其所有文件吗？',
+        kind_raw:                '原始',
+        kind_transcript:         '转录',
+        kind_translation:        '翻译',
+        kind_summary:            '摘要',
+        kind_other:              '文件',
       }
     };
 
     this._initElements();
     this._bindEvents();
     this._loadSettings();
+    this._initLibrary();
     this._switchLang('en');
   }
 
@@ -181,6 +212,21 @@ class VideoTranscriber {
     this.fileInput          = document.getElementById('fileInput');
     this.uploadMaxMb        = 200;
     this._allowedUploadExts = new Set(['.txt', '.mp3', '.mp4', '.m4a', '.wav', '.webm', '.mkv', '.ogg', '.flac']);
+    // library
+    this.libraryCard        = document.getElementById('libraryCard');
+    this.libraryHeader      = document.getElementById('libraryHeader');
+    this.libraryGroupsEl    = document.getElementById('libraryGroups');
+    this.libraryEmpty       = document.getElementById('libraryEmpty');
+    this.libraryCount       = document.getElementById('libraryCount');
+    this.libraryRefreshBtn  = document.getElementById('libraryRefreshBtn');
+    this.libModalBackdrop   = document.getElementById('libModalBackdrop');
+    this.libModalBadge      = document.getElementById('libModalBadge');
+    this.libModalTitle      = document.getElementById('libModalTitle');
+    this.libModalBody       = document.getElementById('libModalBody');
+    this.libModalDownload   = document.getElementById('libModalDownload');
+    this.libModalClose      = document.getElementById('libModalClose');
+    this._libOpenGroups     = new Set();
+    this._libModalFile      = null;
   }
 
   /* ── Events ───────────────────────────────────────────── */
@@ -233,6 +279,31 @@ class VideoTranscriber {
     this.dlScript.addEventListener('click',      () => this._downloadFile('script'));
     this.dlTranslation.addEventListener('click', () => this._downloadFile('translation'));
     this.dlSummary.addEventListener('click',     () => this._downloadFile('summary'));
+
+    // Library
+    if (this.libraryHeader) {
+      this.libraryHeader.addEventListener('click', (e) => {
+        if (this.libraryRefreshBtn.contains(e.target)) return;
+        this._toggleLibrary();
+      });
+      this.libraryHeader.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._toggleLibrary(); }
+      });
+      this.libraryRefreshBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._loadLibrary();
+      });
+      this.libModalClose.addEventListener('click', () => this._closeLibModal());
+      this.libModalBackdrop.addEventListener('click', (e) => {
+        if (e.target === this.libModalBackdrop) this._closeLibModal();
+      });
+      this.libModalDownload.addEventListener('click', () => {
+        if (this._libModalFile) this._downloadLibFile(this._libModalFile.folder, this._libModalFile.name);
+      });
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && this.libModalBackdrop.classList.contains('show')) this._closeLibModal();
+      });
+    }
 
     if (this.uploadPickBtn && this.fileInput && this.uploadZone) {
       this.uploadPickBtn.addEventListener('click', (e) => {
@@ -291,6 +362,10 @@ class VideoTranscriber {
     document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
       const v = this.t(el.dataset.i18nPlaceholder);
       if (typeof v === 'string') el.placeholder = v;
+    });
+    document.querySelectorAll('[data-i18n-title]').forEach(el => {
+      const v = this.t(el.dataset.i18nTitle);
+      if (typeof v === 'string') el.title = v;
     });
   }
 
@@ -425,7 +500,7 @@ class VideoTranscriber {
     }
 
     this.fetchModelsBtn.disabled = true;
-    this.fetchIcon.className = 'fas fa-spinner fa-spin';
+    this.fetchIcon.classList.add('spinning');
     if (!silent) this._setFetchStatus('', this.t('fetching_models'));
 
     try {
@@ -476,7 +551,7 @@ class VideoTranscriber {
     } finally {
       if (fetchToken === this._modelFetchToken) {
         this.fetchModelsBtn.disabled = false;
-        this.fetchIcon.className = 'fas fa-sync-alt';
+        this.fetchIcon.classList.remove('spinning');
       }
     }
   }
@@ -611,6 +686,7 @@ class VideoTranscriber {
         if (task.status === 'completed') {
           this._stopSP(); this._stopSSE(); this._setLoading(false); this._hideProgress();
           this._showResults(task.script, task.summary, task.video_title, task.translation, task.detected_language, task.summary_language);
+          this._loadLibrary();
         } else if (task.status === 'error') {
           this._stopSP(); this._stopSSE(); this._setLoading(false); this._hideProgress();
           this._showError(task.error || 'Processing error');
@@ -628,6 +704,7 @@ class VideoTranscriber {
             if (task?.status === 'completed') {
               this._stopSP(); this._setLoading(false); this._hideProgress();
               this._showResults(task.script, task.summary, task.video_title, task.translation, task.detected_language, task.summary_language);
+              this._loadLibrary();
               return;
             }
           }
@@ -838,14 +915,16 @@ class VideoTranscriber {
       const task = await r.json();
 
       let filename;
-      if      (type === 'script')      filename = task.script_path      ? task.script_path.split('/').pop()      : `transcript_${task.safe_title||'x'}_${task.short_id||'x'}.md`;
-      else if (type === 'summary')     filename = task.summary_path     ? task.summary_path.split('/').pop()     : `summary_${task.safe_title||'x'}_${task.short_id||'x'}.md`;
-      else if (type === 'translation') filename = task.translation_path ? task.translation_path.split('/').pop() : `translation_${task.safe_title||'x'}_${task.short_id||'x'}.md`;
+      if      (type === 'script')      filename = task.script_filename      || (task.script_path      ? task.script_path.split('/').pop()      : `transcript_${task.safe_title||'x'}_${task.short_id||'x'}.md`);
+      else if (type === 'summary')     filename = task.summary_filename     || (task.summary_path     ? task.summary_path.split('/').pop()     : `summary_${task.safe_title||'x'}_${task.short_id||'x'}.md`);
+      else if (type === 'translation') filename = task.translation_filename || (task.translation_path ? task.translation_path.split('/').pop() : `translation_${task.safe_title||'x'}_${task.short_id||'x'}.md`);
       else throw new Error('Unknown type');
 
       const a = document.createElement('a');
-      a.href = `${this.apiBase}/download/${encodeURIComponent(filename)}`;
-      a.download = filename;
+      a.href = task.output_folder
+        ? `${this.apiBase}/download/${encodeURIComponent(task.output_folder)}/${encodeURIComponent(filename)}`
+        : `${this.apiBase}/download/${encodeURIComponent(filename)}`;
+      a.download = task.output_folder ? `${task.output_folder}_${filename}` : filename;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -854,12 +933,184 @@ class VideoTranscriber {
     }
   }
 
+  /* ── Library (generated files) ────────────────────────── */
+  _initLibrary() {
+    if (!this.libraryCard) return;
+    // 默认展开面板；记住用户折叠偏好
+    const collapsed = localStorage.getItem('vt_lib_collapsed') === '1';
+    this.libraryCard.classList.toggle('open', !collapsed);
+    this.libraryHeader.setAttribute('aria-expanded', String(!collapsed));
+    this._loadLibrary();
+  }
+
+  _toggleLibrary() {
+    const open = this.libraryCard.classList.toggle('open');
+    this.libraryHeader.setAttribute('aria-expanded', String(open));
+    try { localStorage.setItem('vt_lib_collapsed', open ? '0' : '1'); } catch (_) {}
+    if (open) this._loadLibrary();
+  }
+
+  async _loadLibrary() {
+    try {
+      const r = await fetch(`${this.apiBase}/files`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      this._renderLibrary(data.groups || []);
+    } catch (e) {
+      this.libraryGroupsEl.innerHTML = '';
+      this.libraryEmpty.style.display = 'block';
+      this.libraryEmpty.textContent = this.t('error_processing_failed') + (e.message || '');
+    }
+  }
+
+  _renderLibrary(groups) {
+    const total = groups.reduce((n, g) => n + g.files.length, 0);
+    this.libraryCount.hidden = total === 0;
+    this.libraryCount.textContent = String(total);
+
+    if (!groups.length) {
+      this.libraryGroupsEl.innerHTML = '';
+      this.libraryEmpty.style.display = 'block';
+      this.libraryEmpty.textContent = this.t('library_empty');
+      return;
+    }
+    this.libraryEmpty.style.display = 'none';
+
+    // 新分组默认展开第一个；保留用户已展开的分组
+    if (!this._libOpenGroups.size && groups[0]) this._libOpenGroups.add(groups[0].folder);
+
+    this.libraryGroupsEl.innerHTML = '';
+    groups.forEach(g => {
+      const groupEl = document.createElement('div');
+      groupEl.className = 'lib-group' + (this._libOpenGroups.has(g.folder) ? ' open' : '');
+
+      const head = document.createElement('div');
+      head.className = 'lib-group-head';
+      head.innerHTML = `
+        <svg class="lib-group-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4l4 4-4 4"/></svg>
+        <span class="lib-group-title">${this._esc(g.title || this.t('library_ungrouped'))}</span>
+        <span class="lib-group-meta">${this.t('library_files_count')(g.files.length)} · ${this._fmtTime(g.mtime)}</span>`;
+      head.addEventListener('click', () => {
+        const open = groupEl.classList.toggle('open');
+        if (open) this._libOpenGroups.add(g.folder);
+        else this._libOpenGroups.delete(g.folder);
+      });
+      groupEl.appendChild(head);
+
+      const filesEl = document.createElement('div');
+      filesEl.className = 'lib-files';
+      g.files.forEach(f => filesEl.appendChild(this._renderLibFile(g.folder, f)));
+      groupEl.appendChild(filesEl);
+
+      this.libraryGroupsEl.appendChild(groupEl);
+    });
+  }
+
+  _renderLibFile(folder, f) {
+    const row = document.createElement('div');
+    row.className = 'lib-file';
+
+    const kind = f.kind || 'other';
+    const meta = `${this._fmtSize(f.size)} · ${this._fmtTime(f.mtime)}`;
+    row.innerHTML = `
+      <span class="lib-badge ${this._esc(kind)}">${this._esc(this.t(`kind_${kind}`) || kind)}</span>
+      <span class="lib-file-name">${this._esc(f.name)}</span>
+      ${f.model ? `<span class="lib-file-model">${this._esc(f.model)}</span>` : ''}
+      <span class="lib-file-meta">${this._esc(meta)}</span>
+      <span class="lib-file-actions">
+        <button type="button" class="lib-icon-btn lib-act-dl" title="${this._esc(this.t('library_download'))}">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v8M5 7.5l3 3 3-3"/><path d="M2.5 12.5h11"/></svg>
+        </button>
+        <button type="button" class="lib-icon-btn danger lib-act-del" title="${this._esc(this.t('library_delete'))}">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4h11"/><path d="M6.5 4V2.5h3V4"/><path d="M4 4l.7 9.5h6.6L12 4"/></svg>
+        </button>
+      </span>`;
+
+    row.addEventListener('click', () => this._openLibPreview(folder, f.name));
+    row.querySelector('.lib-act-dl').addEventListener('click', (e) => {
+      e.stopPropagation();
+      this._downloadLibFile(folder, f.name);
+    });
+    row.querySelector('.lib-act-del').addEventListener('click', (e) => {
+      e.stopPropagation();
+      this._deleteLibFile(folder, f.name);
+    });
+    return row;
+  }
+
+  async _openLibPreview(folder, name) {
+    try {
+      const r = await fetch(`${this.apiBase}/files/${encodeURIComponent(folder)}/${encodeURIComponent(name)}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const f = await r.json();
+      this._libModalFile = { folder, name };
+      const kind = f.kind || 'other';
+      this.libModalBadge.className = `lib-badge ${kind}`;
+      this.libModalBadge.textContent = this.t(`kind_${kind}`) || kind;
+      this.libModalTitle.textContent = name;
+      this.libModalBody.innerHTML = marked.parse(f.content || '');
+      this.libModalBackdrop.classList.add('show');
+      document.body.style.overflow = 'hidden';
+    } catch (e) {
+      this._showError(this.t('error_processing_failed') + (e.message || ''));
+    }
+  }
+
+  _closeLibModal() {
+    this.libModalBackdrop.classList.remove('show');
+    document.body.style.overflow = '';
+    this._libModalFile = null;
+  }
+
+  _downloadLibFile(folder, name) {
+    const a = document.createElement('a');
+    const isRoot = folder === '_root';
+    a.href = isRoot
+      ? `${this.apiBase}/download/${encodeURIComponent(name)}`
+      : `${this.apiBase}/download/${encodeURIComponent(folder)}/${encodeURIComponent(name)}`;
+    a.download = isRoot ? name : `${folder}_${name}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  async _deleteLibFile(folder, name) {
+    if (!window.confirm(this.t('library_delete_file_confirm'))) return;
+    try {
+      const r = await fetch(`${this.apiBase}/files/${encodeURIComponent(folder)}/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      if (this._libModalFile?.folder === folder && this._libModalFile?.name === name) this._closeLibModal();
+      await this._loadLibrary();
+    } catch (e) {
+      this._showError(this.t('error_processing_failed') + (e.message || ''));
+    }
+  }
+
+  /* ── Library helpers ──────────────────────────────────── */
+  _esc(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
+  _fmtSize(bytes) {
+    const n = Number(bytes) || 0;
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  }
+  _fmtTime(mtime) {
+    if (!mtime) return '';
+    const d = new Date(mtime * 1000);
+    const pad = (x) => String(x).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
   /* ── UI helpers ───────────────────────────────────────── */
   _setLoading(on) {
     this.submitBtn.disabled = on;
     this.submitBtn.innerHTML = on
       ? `<span class="spinner"></span> ${this.t('processing')}`
-      : `<i class="fas fa-search"></i> <span>${this.t('start_transcription')}</span>`;
+      : `<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg> <span>${this.t('start_transcription')}</span>`;
     if (this.uploadPickBtn) this.uploadPickBtn.disabled = on;
     if (this.uploadZone) {
       this.uploadZone.style.pointerEvents = on ? 'none' : '';

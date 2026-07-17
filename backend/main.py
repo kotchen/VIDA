@@ -145,6 +145,23 @@ def _sanitize_title_for_filename(title: str) -> str:
     return safe[:80] or "untitled"
 
 
+def _sanitize_model_for_filename(model_id: str) -> str:
+    """将模型名清洗为安全的文件名片段（如 openai/gpt-4o → gpt-4o）。"""
+    if not model_id:
+        return "default"
+    # 去掉供应商前缀，只保留最后一段
+    tail = str(model_id).strip().split("/")[-1]
+    safe = re.sub(r"[^\w\-\.]", "", tail).strip("._-")
+    return safe[:40] or "default"
+
+
+def _output_dir_for_task(safe_title: str, short_id: str) -> Path:
+    """按标题+任务短ID创建输出目录并返回路径。"""
+    out_dir = TEMP_DIR / f"{safe_title}_{short_id}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
 def _txt_to_raw_transcript_markdown(body: str) -> str:
     """将纯文本包装为与 Whisper 输出结构一致的 Markdown。"""
     text = body.strip() if body.strip() else "(empty)"
@@ -169,17 +186,24 @@ async def _run_post_extract_pipeline(
     request_summarizer: Summarizer,
     request_translator: Translator,
     dedup_url: Optional[str] = None,
+    model_id: str = "",
 ) -> None:
     """取得 raw_script 后的共用管线：归档、优化、翻译、摘要、广播。"""
     short_id = task_id.replace("-", "")[:6]
     safe_title = _sanitize_title_for_filename(video_title)
+    model_slug = _sanitize_model_for_filename(model_id)
+    out_dir = _output_dir_for_task(safe_title, short_id)
+    folder_name = out_dir.name
 
     try:
-        raw_md_filename = f"raw_{safe_title}_{short_id}.md"
-        raw_md_path = TEMP_DIR / raw_md_filename
+        raw_md_filename = f"raw_{model_slug}.md"
+        raw_md_path = out_dir / raw_md_filename
         with open(raw_md_path, "w", encoding="utf-8") as f:
             f.write((raw_script or "") + f"\n\nsource: {source_ref}\n")
-        tasks[task_id].update({"raw_script_file": raw_md_filename})
+        tasks[task_id].update({
+            "raw_script_file": f"{folder_name}/{raw_md_filename}",
+            "raw_filename": raw_md_filename,
+        })
         save_tasks(tasks)
         await broadcast_task_update(task_id, tasks[task_id])
     except Exception as e:
@@ -225,8 +249,8 @@ async def _run_post_extract_pipeline(
             script, summary_language, detected_language
         )
         translation_with_title = f"# {video_title}\n\n{translation_content}\n\nsource: {source_ref}\n"
-        translation_filename = f"translation_{safe_title}_{short_id}.md"
-        translation_path = TEMP_DIR / translation_filename
+        translation_filename = f"translation_{model_slug}.md"
+        translation_path = out_dir / translation_filename
         async with aiofiles.open(translation_path, "w", encoding="utf-8") as f:
             await f.write(translation_with_title)
     else:
@@ -245,22 +269,13 @@ async def _run_post_extract_pipeline(
     summary = await request_summarizer.summarize(script, summary_language, video_title)
     summary_with_source = summary + f"\n\nsource: {source_ref}\n"
 
-    script_filename = f"transcript_{task_id}.md"
-    script_path = TEMP_DIR / script_filename
+    script_filename = f"transcript_{model_slug}.md"
+    script_path = out_dir / script_filename
     async with aiofiles.open(script_path, "w", encoding="utf-8") as f:
         await f.write(script_with_title)
 
-    new_script_filename = f"transcript_{safe_title}_{short_id}.md"
-    new_script_path = TEMP_DIR / new_script_filename
-    try:
-        if script_path.exists():
-            script_path.rename(new_script_path)
-            script_path = new_script_path
-    except Exception:
-        pass
-
-    summary_filename = f"summary_{safe_title}_{short_id}.md"
-    summary_path = TEMP_DIR / summary_filename
+    summary_filename = f"summary_{model_slug}.md"
+    summary_path = out_dir / summary_filename
     async with aiofiles.open(summary_path, "w", encoding="utf-8") as f:
         await f.write(summary_with_source)
 
@@ -273,6 +288,11 @@ async def _run_post_extract_pipeline(
         "summary": summary_with_source,
         "script_path": str(script_path),
         "summary_path": str(summary_path),
+        "script_filename": script_filename,
+        "summary_filename": summary_filename,
+        "output_folder": folder_name,
+        "model_id": model_id or "",
+        "model_slug": model_slug,
         "short_id": short_id,
         "safe_title": safe_title,
         "detected_language": detected_language,
@@ -580,6 +600,7 @@ async def process_video_task(
             request_summarizer=request_summarizer,
             request_translator=request_translator,
             dedup_url=url,
+            model_id=model_id,
         )
 
         # 不要立即删除临时文件！保留给用户下载
@@ -697,6 +718,7 @@ async def process_upload_task(
             request_summarizer=request_summarizer,
             request_translator=request_translator,
             dedup_url=None,
+            model_id=model_id,
         )
 
     except Exception as e:
@@ -811,6 +833,164 @@ async def download_file(filename: str):
     except Exception as e:
         logger.error(f"下载文件失败: {e}")
         raise HTTPException(status_code=500, detail=f"下载失败: {str(e)}")
+
+
+@app.get("/api/download/{folder}/{filename}")
+async def download_file_in_folder(folder: str, filename: str):
+    """从按标题分组的子目录下载文件"""
+    try:
+        if not filename.endswith('.md'):
+            raise HTTPException(status_code=400, detail="仅支持下载.md文件")
+        for part in (folder, filename):
+            if '..' in part or '/' in part or '\\' in part:
+                raise HTTPException(status_code=400, detail="文件名格式无效")
+
+        file_path = (TEMP_DIR / folder / filename).resolve()
+        if TEMP_DIR.resolve() not in file_path.parents:
+            raise HTTPException(status_code=400, detail="路径无效")
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="文件不存在")
+
+        return FileResponse(
+            file_path,
+            filename=f"{folder}_{filename}",
+            media_type="text/markdown"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"下载文件失败: {e}")
+        raise HTTPException(status_code=500, detail=f"下载失败: {str(e)}")
+
+
+# ── 生成文件库（Library）API ────────────────────────────────
+
+_FILE_KINDS = ("raw", "transcript", "translation", "summary")
+_ROOT_GROUP = "_root"
+
+
+def _parse_md_filename(name: str) -> dict:
+    """解析 {kind}_{model}.md 或旧版 {kind}_{title}_{id}.md 文件名。"""
+    stem = name[:-3] if name.endswith(".md") else name
+    parts = stem.split("_", 1)
+    kind = parts[0] if parts[0] in _FILE_KINDS else "other"
+    model = parts[1] if len(parts) > 1 and parts[0] in _FILE_KINDS else ""
+    return {"kind": kind, "model": model}
+
+
+def _group_display_title(folder_name: str) -> str:
+    """从 {safe_title}_{short_id} 目录名提取展示标题。"""
+    stem = re.sub(r"_[0-9a-f]{6}$", "", folder_name)
+    return stem.replace("_", " ").strip() or folder_name
+
+
+def _file_entry(path: Path, include_model: bool = True) -> dict:
+    stat = path.stat()
+    meta = _parse_md_filename(path.name)
+    return {
+        "name": path.name,
+        "kind": meta["kind"],
+        "model": meta["model"] if include_model else "",
+        "size": stat.st_size,
+        "mtime": stat.st_mtime,
+    }
+
+
+def _resolve_in_temp(folder: str, filename: Optional[str] = None) -> Path:
+    """安全解析 temp 内路径，阻止路径遍历。"""
+    for part in [p for p in (folder, filename) if p]:
+        if '..' in part or '/' in part or '\\' in part:
+            raise HTTPException(status_code=400, detail="路径格式无效")
+    base = TEMP_DIR.resolve()
+    target = (base / ("" if folder == _ROOT_GROUP else folder) / (filename or "")).resolve()
+    if target != base and base not in target.parents:
+        raise HTTPException(status_code=400, detail="路径无效")
+    return target
+
+
+@app.get("/api/files")
+async def list_generated_files():
+    """列出 temp 下所有生成的 Markdown 文件，按标题目录分组。"""
+    groups = []
+    try:
+        # 子目录分组（新版结构：{safe_title}_{short_id}/xxx.md）
+        for d in sorted(TEMP_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+            if not d.is_dir():
+                continue
+            md_files = sorted(d.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not md_files:
+                continue
+            groups.append({
+                "folder": d.name,
+                "title": _group_display_title(d.name),
+                "mtime": max(p.stat().st_mtime for p in md_files),
+                "files": [_file_entry(p) for p in md_files],
+            })
+
+        # 根目录遗留散文件（旧版结构，文件名不含模型信息）
+        root_files = sorted(TEMP_DIR.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if root_files:
+            groups.append({
+                "folder": _ROOT_GROUP,
+                "title": "",
+                "mtime": max(p.stat().st_mtime for p in root_files),
+                "files": [_file_entry(p, include_model=False) for p in root_files],
+            })
+    except Exception as e:
+        logger.error(f"列出文件失败: {e}")
+        raise HTTPException(status_code=500, detail=f"列出文件失败: {str(e)}")
+
+    return {"groups": groups}
+
+
+@app.get("/api/files/{folder}/{filename}")
+async def read_generated_file(folder: str, filename: str):
+    """读取单个生成文件的内容用于预览。"""
+    if not filename.endswith('.md'):
+        raise HTTPException(status_code=400, detail="仅支持预览.md文件")
+    file_path = _resolve_in_temp(folder, filename)
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if file_path.stat().st_size > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="文件过大，无法预览")
+    content = file_path.read_text(encoding="utf-8", errors="replace")
+    entry = _file_entry(file_path)
+    entry["content"] = content
+    return entry
+
+
+@app.delete("/api/files/{folder}/{filename}")
+async def delete_generated_file(folder: str, filename: str):
+    """删除单个生成文件；目录清空后顺带删除目录。"""
+    file_path = _resolve_in_temp(folder, filename)
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    try:
+        file_path.unlink()
+        parent = file_path.parent
+        if parent != TEMP_DIR.resolve() and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+        return {"message": "文件已删除"}
+    except Exception as e:
+        logger.error(f"删除文件失败: {e}")
+        raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
+
+
+@app.delete("/api/files/{folder}")
+async def delete_generated_folder(folder: str):
+    """删除整个分组目录及其中的 Markdown 文件。"""
+    if folder == _ROOT_GROUP:
+        raise HTTPException(status_code=400, detail="根目录分组不支持整体删除")
+    dir_path = _resolve_in_temp(folder)
+    if not dir_path.is_dir():
+        raise HTTPException(status_code=404, detail="目录不存在")
+    try:
+        import shutil
+        shutil.rmtree(dir_path)
+        return {"message": "目录已删除"}
+    except Exception as e:
+        logger.error(f"删除目录失败: {e}")
+        raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
 
 
 @app.delete("/api/task/{task_id}")
