@@ -6,6 +6,7 @@ from typing import Optional
 from openai import OpenAI
 
 from llm_sanitize import strip_llm_artifacts
+from model_settings import validate_temperature
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +19,10 @@ class Translator:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
+        temperature: float = 0.1,
     ):
         self.client = None
+        self.temperature = validate_temperature(temperature)
         self._translation_model = model or os.getenv("OPENAI_TRANSLATION_MODEL", "gpt-4o")
 
         self.language_map = {
@@ -59,6 +62,10 @@ class Translator:
             logger.error(f"初始化 OpenAI 客户端失败: {e}")
             self.client = None
     
+    def _create_completion(self, **kwargs):
+        kwargs["temperature"] = self.temperature
+        return self.client.chat.completions.create(**kwargs)
+
     def _detect_source_language(self, text: str) -> str:
         """检测源文本语言"""
         # 简单的语言检测逻辑
@@ -246,14 +253,13 @@ class Translator:
 只返回翻译结果，不要添加任何说明。"""
 
         try:
-            response = self.client.chat.completions.create(
+            response = self._create_completion(
                 model=self._translation_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
                 max_tokens=4000,
-                temperature=0.1
             )
 
             return strip_llm_artifacts(response.choices[0].message.content or "")
@@ -290,14 +296,13 @@ class Translator:
 只返回翻译结果。"""
 
             try:
-                response = self.client.chat.completions.create(
+                response = self._create_completion(
                     model=self._translation_model,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
                     max_tokens=4000,
-                    temperature=0.1
                 )
 
                 translated_chunk = response.choices[0].message.content or ""
