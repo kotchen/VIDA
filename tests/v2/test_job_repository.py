@@ -48,8 +48,9 @@ class JobRepositoryTests(unittest.TestCase):
 
         returned = self.repo.enqueue(job)
 
-        self.assertEqual(returned, job)
-        self.assertEqual(self.repo.get("j1"), job)
+        canonical_job = replace(job, submitted_at="2026-07-18T01:00:00.000000Z")
+        self.assertEqual(returned, canonical_job)
+        self.assertEqual(self.repo.get("j1"), canonical_job)
         episode = self._episode_row("e1")
         self.assertEqual(
             (episode["current_job_id"], episode["status"], episode["progress"],
@@ -136,6 +137,56 @@ class JobRepositoryTests(unittest.TestCase):
 
         self.assertEqual(claimed, ["j1", "j2", "j3"])
         self.assertIsNone(self.repo.claim_next("worker", "2026-07-18T00:02:00Z"))
+
+    def test_fifo_normalizes_mixed_precision_and_equal_utc_instants(self):
+        cases = (
+            ("e-later", "j-later", "2026-07-18T00:00:00.900000Z"),
+            ("e-equal-z", "j-a", "2026-07-18T00:00:00Z"),
+            ("e-equal-offset", "j-z", "2026-07-18T00:00:00.000000+00:00"),
+        )
+        for episode_id, job_id, submitted_at in cases:
+            self._episode(episode_id)
+            self.repo.enqueue(self._job(episode_id, job_id, submitted_at=submitted_at))
+
+        self.assertEqual(
+            [self.repo.queue_position(job_id) for job_id in ("j-a", "j-z", "j-later")],
+            [1, 2, 3],
+        )
+        claimed = [
+            self.repo.claim_next("worker", f"2026-07-18T00:01:0{index}Z").id
+            for index in range(3)
+        ]
+        self.assertEqual(claimed, ["j-a", "j-z", "j-later"])
+        self.assertEqual(
+            [self.repo.get_required(job_id).submitted_at for job_id in claimed],
+            [
+                "2026-07-18T00:00:00.000000Z",
+                "2026-07-18T00:00:00.000000Z",
+                "2026-07-18T00:00:00.900000Z",
+            ],
+        )
+
+    def test_enqueue_rejects_malformed_or_non_utc_submission_time(self):
+        invalid_values = (
+            "not-a-time",
+            "2026-07-18T00:00:00",
+            "2026-07-18T08:00:00+08:00",
+        )
+        for index, submitted_at in enumerate(invalid_values):
+            with self.subTest(submitted_at=submitted_at):
+                self._reset_database()
+                self._episode("e1", status="failed", progress=50, message="Old error")
+                job = self._job("e1", f"j{index}", submitted_at=submitted_at)
+
+                with self.assertRaisesRegex(ValueError, "submitted_at"):
+                    self.repo.enqueue(job)
+
+                self.assertIsNone(self.repo.get(job.id))
+                episode = self._episode_row("e1")
+                self.assertEqual(
+                    (episode["current_job_id"], episode["status"], episode["progress"]),
+                    (None, "failed", 50),
+                )
 
     def test_claims_fifo_once_across_concurrent_callers(self):
         self._episode("e1")
@@ -277,6 +328,8 @@ class JobRepositoryTests(unittest.TestCase):
                 self.repo.enqueue(self._job("e1", "j1"))
                 self.repo.claim_next("worker", "2026-07-18T00:01:00Z")
                 self.repo.update_progress("j1", 42, "Working", "2026-07-18T00:02:00Z")
+                if status == "canceled":
+                    self.repo.request_cancel("j1", "2026-07-18T00:02:30Z")
 
                 job = transition()
 
@@ -294,6 +347,32 @@ class JobRepositoryTests(unittest.TestCase):
                     (status, progress, message, code, error,
                      "2026-07-18T00:03:00Z", "2026-07-18T00:03:00Z"),
                 )
+
+    def test_mark_canceled_requires_prior_processing_cancel_request(self):
+        self._episode("e1")
+        self.repo.enqueue(self._job("e1", "j1"))
+        self.repo.claim_next("worker", "2026-07-18T00:01:00Z")
+
+        with self.assertRaises(InvalidJobState):
+            self.repo.mark_canceled("j1", "2026-07-18T00:02:00Z")
+
+        job = self.repo.get_required("j1")
+        episode = self._episode_row("e1")
+        self.assertEqual(
+            (job.status, job.cancel_requested_at, job.finished_at, job.message),
+            ("processing", None, None, "Preparing"),
+        )
+        self.assertEqual(
+            (episode["status"], episode["message"], episode["completed_at"]),
+            ("processing", "Preparing", None),
+        )
+
+        self.repo.request_cancel("j1", "2026-07-18T00:02:30Z")
+        canceled = self.repo.mark_canceled("j1", "2026-07-18T00:03:00Z")
+        self.assertEqual(
+            (canceled.status, canceled.cancel_requested_at, canceled.finished_at),
+            ("canceled", "2026-07-18T00:02:30Z", "2026-07-18T00:03:00Z"),
+        )
 
     def test_illegal_progress_terminal_and_cancel_transitions_raise_domain_error(self):
         self._episode("e1")

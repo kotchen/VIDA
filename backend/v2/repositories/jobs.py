@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from sqlite3 import Connection, Row
 
 from ..database import Database
@@ -13,22 +13,27 @@ class JobRepository:
 
     def enqueue(self, job: JobRecord) -> JobRecord:
         _validate_fresh_job(job)
+        submitted_at = _canonical_utc_timestamp(job.submitted_at, "submitted_at")
         with self._database.transaction(immediate=True) as conn:
             conn.execute(
                 f"INSERT INTO jobs ({', '.join(_JOB_COLUMNS)}) "
                 f"VALUES ({', '.join('?' for _ in _JOB_COLUMNS)})",
-                tuple(getattr(job, column) for column in _JOB_COLUMNS),
+                tuple(
+                    submitted_at if column == "submitted_at" else getattr(job, column)
+                    for column in _JOB_COLUMNS
+                ),
             )
             if job.type == "process_episode":
                 changed = conn.execute(
                     "UPDATE episodes SET current_job_id=?,status='queued',progress=?,"
                     "message=?,warnings_json='[]',error_code=NULL,error_message=NULL,"
                     "completed_at=NULL,updated_at=? WHERE id=?",
-                    (job.id, job.progress, job.message, job.submitted_at, job.episode_id),
+                    (job.id, job.progress, job.message, submitted_at, job.episode_id),
                 ).rowcount
                 if changed != 1:
                     raise KeyError(job.episode_id)
-        return job
+            stored = _require_job(conn, job.id)
+        return _job_from_row(stored)
 
     def get(self, job_id: str) -> JobRecord | None:
         with self._database.connect() as conn:
@@ -142,7 +147,9 @@ class JobRepository:
         )
 
     def mark_canceled(self, job_id: str, now: str) -> JobRecord:
-        return self._finish(job_id, "canceled", now, message="Canceled")
+        return self._finish(
+            job_id, "canceled", now, message="Canceled", require_cancel_requested=True
+        )
 
     def _finish(
         self,
@@ -154,10 +161,13 @@ class JobRepository:
         message: str,
         error_code: str | None = None,
         error_message: str | None = None,
+        require_cancel_requested: bool = False,
     ) -> JobRecord:
         with self._database.transaction(immediate=True) as conn:
             row = _require_job(conn, job_id)
             _require_processing(row)
+            if require_cancel_requested and row["cancel_requested_at"] is None:
+                raise InvalidJobState(job_id, row["status"])
             _require_episode_ownership(conn, row)
             terminal_progress = row["progress"] if progress is None else progress
             changed = conn.execute(
@@ -259,6 +269,22 @@ def _validate_fresh_job(job: JobRecord) -> None:
     )
     if job.progress != 0 or any(value is not None for value in runtime_fields):
         raise ValueError("enqueued job must have fresh queued state")
+
+
+def _canonical_utc_timestamp(value: str, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a UTC ISO-8601 timestamp")
+    if not (value.endswith("Z") or value.endswith("+00:00")):
+        raise ValueError(f"{field} must be a UTC ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError as exc:
+        raise ValueError(f"{field} must be a UTC ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise ValueError(f"{field} must be a UTC ISO-8601 timestamp")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def _require_episode_ownership(conn: Connection, row: Row) -> None:
