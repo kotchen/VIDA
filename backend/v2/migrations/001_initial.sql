@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS provider_profiles (
     deleted_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    FOREIGN KEY (active_revision_id) REFERENCES provider_profile_revisions(id)
+    FOREIGN KEY (id, active_revision_id)
+        REFERENCES provider_profile_revisions(profile_id, id)
 );
 
 CREATE TABLE IF NOT EXISTS provider_profile_revisions (
@@ -27,6 +28,7 @@ CREATE TABLE IF NOT EXISTS provider_profile_revisions (
     encryption_format_version INTEGER NOT NULL CHECK (encryption_format_version >= 1),
     created_at TEXT NOT NULL,
     FOREIGN KEY (profile_id) REFERENCES provider_profiles(id),
+    UNIQUE (profile_id, id),
     UNIQUE (profile_id, version)
 );
 
@@ -56,7 +58,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     completed_at TEXT,
-    FOREIGN KEY (current_job_id) REFERENCES jobs(id),
+    FOREIGN KEY (id, current_job_id) REFERENCES jobs(episode_id, id),
     FOREIGN KEY (provider_profile_id) REFERENCES provider_profiles(id),
     CHECK (
         (source_type = 'upload' AND source_path IS NOT NULL AND source_url IS NULL)
@@ -83,6 +85,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     error_message TEXT,
     FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE,
     FOREIGN KEY (provider_profile_revision_id) REFERENCES provider_profile_revisions(id),
+    UNIQUE (episode_id, id),
     UNIQUE (episode_id, attempt)
 );
 

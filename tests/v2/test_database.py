@@ -59,6 +59,16 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual([row[0] for row in migrations], [1])
 
+    def test_every_connection_uses_required_pragmas(self):
+        with self.db.connect() as conn:
+            pragmas = (
+                conn.execute("PRAGMA journal_mode").fetchone()[0],
+                conn.execute("PRAGMA foreign_keys").fetchone()[0],
+                conn.execute("PRAGMA busy_timeout").fetchone()[0],
+                conn.execute("PRAGMA synchronous").fetchone()[0],
+            )
+        self.assertEqual(pragmas, ("wal", 1, 5000, 1))
+
     def test_schema_has_media_warning_language_fields_and_required_indexes(self):
         with self.db.connect() as conn:
             episode_columns = {
@@ -117,6 +127,54 @@ class DatabaseTests(unittest.TestCase):
                         1,
                         "Processing",
                     ),
+                )
+
+    def test_profile_active_revision_must_belong_to_that_profile(self):
+        with self.db.transaction() as conn:
+            conn.executemany(
+                "INSERT INTO provider_profiles"
+                "(id,name,active_revision_id,created_at,updated_at) VALUES(?,?,?,?,?)",
+                [
+                    ("p1", "Primary", None, NOW, NOW),
+                    ("p2", "Secondary", None, NOW, NOW),
+                ],
+            )
+            conn.execute(
+                "INSERT INTO provider_profile_revisions"
+                "(id,profile_id,version,base_url,model_id,temperature,encrypted_api_key,"
+                "encryption_nonce,encryption_format_version,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "r1", "p1", 1, "https://api.example/v1", "model-a", 0.1,
+                    "ciphertext", "nonce", 1, NOW,
+                ),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE provider_profiles SET active_revision_id=? WHERE id=?",
+                    ("r1", "p2"),
+                )
+
+    def test_episode_current_job_must_belong_to_that_episode(self):
+        with self.db.transaction() as conn:
+            self._insert_profile_episode(conn)
+            conn.execute(
+                "INSERT INTO episodes"
+                "(id,title,source_type,source_url,status,progress,message,summary_language,"
+                "provider_profile_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "e2", "Other", "url", "https://example.test/other", "queued", 0,
+                    "Queued", "zh", "p1", NOW, NOW,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO jobs"
+                "(id,episode_id,type,attempt,status,provider_profile_revision_id,"
+                "submitted_at,progress,message) VALUES(?,?,?,?,?,?,?,?,?)",
+                ("j1", "e1", "process_episode", 1, "queued", "r1", NOW, 0, "Queued"),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE episodes SET current_job_id=? WHERE id=?", ("j1", "e2")
                 )
 
     def test_schema_rejects_invalid_states_progress_and_source_shapes(self):
