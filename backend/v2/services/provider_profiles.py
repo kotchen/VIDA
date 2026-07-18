@@ -112,7 +112,14 @@ class ProviderProfileService:
             record.temperature,
             record.revision,
             record.active_revision_id,
-            "••••••••" + api_key[-4:],
+            _mask_key(api_key),
             record.created_at,
             record.updated_at,
         )
+
+
+def _mask_key(api_key: str) -> str:
+    mask = "\u2022" * 8
+    if len(api_key) <= 4:
+        return mask
+    return mask + api_key[-4:]
