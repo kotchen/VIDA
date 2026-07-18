@@ -4,9 +4,13 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
-from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exception_handlers import (
+    http_exception_handler,
+    request_validation_exception_handler,
+)
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 
 class V2Error(Exception):
@@ -27,11 +31,20 @@ class V2Error(Exception):
 def install_v2_error_contract(app: FastAPI) -> None:
     @app.middleware("http")
     async def attach_request_id(request: Request, call_next):
-        if not request.url.path.startswith("/api/v2"):
+        if not _is_v2_path(request.url.path):
             return await call_next(request)
         request_id = request.headers.get("X-Request-ID") or str(uuid4())
         request.state.request_id = request_id
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            response = _error_response(
+                request,
+                "internal_error",
+                "Internal server error",
+                500,
+                {},
+            )
         response.headers["X-Request-ID"] = request_id
         return response
 
@@ -39,9 +52,19 @@ def install_v2_error_contract(app: FastAPI) -> None:
     async def handle_v2_error(request: Request, exc: V2Error) -> JSONResponse:
         return _error_response(request, exc.code, exc.message, exc.status_code, exc.details)
 
+    @app.exception_handler(StarletteHTTPException)
+    async def handle_http_error(request: Request, exc: StarletteHTTPException):
+        if not _is_v2_path(request.url.path):
+            return await http_exception_handler(request, exc)
+        code, message = {
+            404: ("not_found", "Resource not found"),
+            405: ("method_not_allowed", "Method not allowed"),
+        }.get(exc.status_code, ("http_error", "Request failed"))
+        return _error_response(request, code, message, exc.status_code, {})
+
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(request: Request, exc: RequestValidationError):
-        if not request.url.path.startswith("/api/v2"):
+        if not _is_v2_path(request.url.path):
             return await request_validation_exception_handler(request, exc)
         errors = [
             {
@@ -71,12 +94,15 @@ def _error_response(
     error: dict[str, Any] = {
         "code": code,
         "message": message,
+        "details": details,
         "requestId": request_id,
     }
-    if details:
-        error["details"] = details
     return JSONResponse(
         status_code=status_code,
         content={"error": error},
         headers={"X-Request-ID": request_id},
     )
+
+
+def _is_v2_path(path: str) -> bool:
+    return path == "/api/v2" or path.startswith("/api/v2/")

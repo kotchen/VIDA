@@ -69,6 +69,8 @@ class ProviderProfileUpdate(ApiModel):
     def require_change(self) -> "ProviderProfileUpdate":
         if not self.model_fields_set:
             raise ValueError("at least one field must be provided")
+        if any(getattr(self, field) is None for field in self.model_fields_set):
+            raise ValueError("update fields must not be null")
         return self
 
 
