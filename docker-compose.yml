@@ -12,6 +12,10 @@ services:
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-base}
       # 可选：本地上传单文件大小上限（MB），与本地环境变量一致
       - UPLOAD_MAX_MB=${UPLOAD_MAX_MB:-200}
+      # VIDA 2.0 startup configuration
+      - V2_MAX_CONCURRENT_JOBS=${V2_MAX_CONCURRENT_JOBS:-2}
+      - V2_UPLOAD_MAX_GB=${V2_UPLOAD_MAX_GB:-5}
+      - VIDA_PROFILE_MASTER_KEY=${VIDA_PROFILE_MASTER_KEY:-}
       # 服务器配置
       - HOST=0.0.0.0
       - PORT=8000

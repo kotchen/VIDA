@@ -1,3 +1,4 @@
+import base64
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,6 +8,20 @@ import start
 
 
 class StartupOptionsTests(unittest.TestCase):
+    def test_v2_cli_values_override_environment(self):
+        key = base64.urlsafe_b64encode(b"k" * 32).decode("ascii")
+        options = start.parse_startup_options(
+            ["--max-concurrent-jobs", "3", "--profile-master-key", key],
+            {
+                "V2_MAX_CONCURRENT_JOBS": "2",
+                "V2_UPLOAD_MAX_GB": "7",
+                "VIDA_PROFILE_MASTER_KEY": "environment-key",
+            },
+        )
+        self.assertEqual(options.max_concurrent_jobs, 3)
+        self.assertEqual(options.v2_upload_max_gb, 7)
+        self.assertEqual(options.profile_master_key, key)
+
     def test_cli_port_overrides_environment_port(self):
         options = start.parse_startup_options(
             ["--port", "8001"],
