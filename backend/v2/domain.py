@@ -19,6 +19,13 @@ class JobType(str, Enum):
     REGENERATE_CHAPTERS = "regenerate_chapters"
 
 
+class InvalidJobState(RuntimeError):
+    def __init__(self, job_id: str, status: str):
+        self.job_id = job_id
+        self.status = status
+        super().__init__(f"job {job_id} cannot transition from {status}")
+
+
 @dataclass(frozen=True)
 class ProcessingWarning:
     stage: str
