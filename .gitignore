@@ -70,6 +70,7 @@ models/
 
 #SuperPowers
 .superpowers/brainstorm
+.superpowers/sdd/
 
 # Local Git worktrees
 .worktrees/
