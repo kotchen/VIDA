@@ -176,3 +176,5 @@ def _validate_summary(summary: SummaryRecord) -> None:
         raise TypeError("summary confidence must be an integer")
     if not 0 <= summary.confidence <= 100:
         raise ValueError("summary confidence must be between 0 and 100")
+    if summary.generated_by != "VIDA":
+        raise ValueError("summary generated_by must be VIDA")

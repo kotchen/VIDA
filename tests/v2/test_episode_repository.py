@@ -147,6 +147,10 @@ class EpisodeRepositoryTests(unittest.TestCase):
                 with self.assertRaises((TypeError, ValueError)):
                     SummaryRecord("e1", "bad", 1, key_points, confidence, "VIDA")
 
+    def test_summary_record_requires_vida_as_generator(self):
+        with self.assertRaisesRegex(ValueError, "generated_by"):
+            SummaryRecord("e1", "bad", 1, 1, 50, "r1")
+
     def test_summary_repository_and_database_reject_invalid_numeric_storage(self):
         self.repo.create(self.episode)
         valid = SummaryRecord("e1", "valid", 1, 1, 50, "VIDA")
@@ -183,6 +187,20 @@ class EpisodeRepositoryTests(unittest.TestCase):
                 with self.assertRaises((TypeError, ValueError)):
                     self.repo.replace_summary("e1", record)
         self.assertIsNone(self.repo.get_summary("e1"))
+
+    def test_summary_repository_rejects_non_vida_generator_before_replacement(self):
+        self.repo.create(self.episode)
+        valid = SummaryRecord("e1", "kept", 1, 1, 50, "VIDA")
+        self.repo.replace_summary("e1", valid)
+        bypassed = SimpleNamespace(
+            episode_id="e1", content="bad", read_time_min=1,
+            key_points=1, confidence=50, generated_by="r1",
+        )
+
+        with self.assertRaisesRegex(ValueError, "generated_by"):
+            self.repo.replace_summary("e1", bypassed)
+
+        self.assertEqual(self.repo.get_summary("e1"), valid)
 
     def test_warnings_are_typed_and_json_is_the_only_denormalized_content(self):
         self.repo.create(self.episode)

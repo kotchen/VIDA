@@ -117,6 +117,8 @@ class SummaryRecord:
             raise TypeError("summary confidence must be an integer")
         if not 0 <= self.confidence <= 100:
             raise ValueError("summary confidence must be between 0 and 100")
+        if self.generated_by != "VIDA":
+            raise ValueError("summary generated_by must be VIDA")
 
 
 @dataclass(frozen=True)
