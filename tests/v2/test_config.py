@@ -26,3 +26,20 @@ class V2SettingsTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "VIDA_PROFILE_MASTER_KEY"):
             V2Settings.from_environ({"VIDA_PROFILE_MASTER_KEY": "bad"}, Path("."))
+
+    def test_rejects_non_urlsafe_and_noncanonical_master_keys(self):
+        standard_base64_key = base64.b64encode(b"\xfb" * 32).decode("ascii")
+        self.assertRegex(standard_base64_key, r"[+/]")
+
+        for invalid_key in (
+            standard_base64_key,
+            self.key + "!",
+            self.key + "=",
+        ):
+            with self.subTest(invalid_key=invalid_key):
+                with self.assertRaisesRegex(
+                    ValueError, "VIDA_PROFILE_MASTER_KEY must be URL-safe Base64"
+                ):
+                    V2Settings.from_environ(
+                        {"VIDA_PROFILE_MASTER_KEY": invalid_key}, Path(".")
+                    )
