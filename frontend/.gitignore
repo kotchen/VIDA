@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# shadcn/ui convention: keep src/lib (root .gitignore has a Python "lib/" rule)
+!src/lib
+!src/lib/**
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
