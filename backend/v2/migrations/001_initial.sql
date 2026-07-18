@@ -105,11 +105,10 @@ CREATE TABLE IF NOT EXISTS summaries (
     episode_id TEXT PRIMARY KEY,
     content TEXT NOT NULL,
     read_time_min INTEGER NOT NULL CHECK (read_time_min >= 0),
-    key_points TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(key_points) AND json_type(key_points) = 'array'),
-    confidence REAL CHECK (confidence IS NULL OR confidence BETWEEN 0 AND 1),
-    generated_by TEXT NOT NULL,
-    FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE,
-    FOREIGN KEY (generated_by) REFERENCES provider_profile_revisions(id)
+    key_points INTEGER NOT NULL DEFAULT 0 CHECK (key_points >= 0),
+    confidence INTEGER CHECK (confidence IS NULL OR confidence BETWEEN 0 AND 100),
+    generated_by TEXT NOT NULL CHECK (generated_by = 'VIDA'),
+    FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS chapters (
