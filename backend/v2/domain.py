@@ -105,8 +105,18 @@ class SummaryRecord:
     content: str
     read_time_min: int
     key_points: int
-    confidence: int | None
+    confidence: int
     generated_by: str
+
+    def __post_init__(self) -> None:
+        if type(self.key_points) is not int:
+            raise TypeError("summary key_points must be an integer")
+        if self.key_points < 0:
+            raise ValueError("summary key_points must be non-negative")
+        if type(self.confidence) is not int:
+            raise TypeError("summary confidence must be an integer")
+        if not 0 <= self.confidence <= 100:
+            raise ValueError("summary confidence must be between 0 and 100")
 
 
 @dataclass(frozen=True)

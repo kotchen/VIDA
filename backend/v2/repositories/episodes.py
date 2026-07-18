@@ -78,7 +78,8 @@ class EpisodeRepository:
         with self._database.connect() as conn:
             rows = conn.execute(
                 "SELECT id,episode_id,ordinal,start_sec,end_sec,speaker,text "
-                "FROM transcript_segments WHERE episode_id=? ORDER BY ordinal, id",
+                "FROM transcript_segments WHERE episode_id=? "
+                "ORDER BY start_sec, ordinal, id",
                 (episode_id,),
             ).fetchall()
         return [TranscriptSegmentRecord(*tuple(row)) for row in rows]
@@ -88,6 +89,7 @@ class EpisodeRepository:
             _require_episode(conn, episode_id)
             if summary.episode_id != episode_id:
                 raise ValueError("summary belongs to another episode")
+            _validate_summary(summary)
             conn.execute("DELETE FROM summaries WHERE episode_id=?", (episode_id,))
             conn.execute(
                 "INSERT INTO summaries"
@@ -163,3 +165,14 @@ def _require_episode(conn: Connection, episode_id: str) -> None:
 
 def _episode_from_row(row: Row) -> EpisodeRecord:
     return EpisodeRecord(*(row[column] for column in _EPISODE_COLUMNS))
+
+
+def _validate_summary(summary: SummaryRecord) -> None:
+    if type(summary.key_points) is not int:
+        raise TypeError("summary key_points must be an integer")
+    if summary.key_points < 0:
+        raise ValueError("summary key_points must be non-negative")
+    if type(summary.confidence) is not int:
+        raise TypeError("summary confidence must be an integer")
+    if not 0 <= summary.confidence <= 100:
+        raise ValueError("summary confidence must be between 0 and 100")

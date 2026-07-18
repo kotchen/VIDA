@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 from backend.v2.database import Database
 from backend.v2.domain import (
@@ -77,7 +78,6 @@ class EpisodeRepositoryTests(unittest.TestCase):
         self.assertEqual(
             [row.id for row in self.repo.get_transcript("e1")], ["s1", "s2"]
         )
-
         with self.assertRaises(ValueError):
             self.repo.replace_transcript("e1", [
                 TranscriptSegmentRecord("replacement", "e1", 0, 0, 1, None, "new"),
@@ -93,6 +93,19 @@ class EpisodeRepositoryTests(unittest.TestCase):
             ])
         self.assertEqual(
             [row.id for row in self.repo.get_transcript("e1")], ["s1", "s2"]
+        )
+
+    def test_transcript_reads_are_chronological_when_ordinals_disagree(self):
+        self.repo.create(self.episode)
+        self.repo.replace_transcript("e1", [
+            TranscriptSegmentRecord("later", "e1", 0, 5.0, 8.0, None, "later"),
+            TranscriptSegmentRecord("earlier-b", "e1", 2, 0.0, 2.0, None, "b"),
+            TranscriptSegmentRecord("earlier-a", "e1", 1, 0.0, 1.0, None, "a"),
+        ])
+
+        self.assertEqual(
+            [row.id for row in self.repo.get_transcript("e1")],
+            ["earlier-a", "earlier-b", "later"],
         )
 
     def test_content_replacement_validates_episode_before_mutating(self):
@@ -118,6 +131,58 @@ class EpisodeRepositoryTests(unittest.TestCase):
                 "SELECT key_points,confidence,generated_by FROM summaries"
             ).fetchone()
         self.assertEqual(tuple(stored), (2, 80, "VIDA"))
+
+    def test_summary_record_enforces_integer_count_and_required_percentage(self):
+        for key_points, confidence in ((0, 0), (3, 100)):
+            with self.subTest(key_points=key_points, confidence=confidence):
+                record = SummaryRecord("e1", "ok", 1, key_points, confidence, "VIDA")
+                self.assertEqual((record.key_points, record.confidence), (key_points, confidence))
+
+        invalid_values = (
+            (None, 50), (True, 50), (1.5, 50), ("1", 50), (-1, 50),
+            (1, None), (1, True), (1, 50.5), (1, "50"), (1, -1), (1, 101),
+        )
+        for key_points, confidence in invalid_values:
+            with self.subTest(key_points=key_points, confidence=confidence):
+                with self.assertRaises((TypeError, ValueError)):
+                    SummaryRecord("e1", "bad", 1, key_points, confidence, "VIDA")
+
+    def test_summary_repository_and_database_reject_invalid_numeric_storage(self):
+        self.repo.create(self.episode)
+        valid = SummaryRecord("e1", "valid", 1, 1, 50, "VIDA")
+        self.repo.replace_summary("e1", valid)
+
+        for field, value in (("key_points", None), ("key_points", 1.5),
+                             ("confidence", None),
+                             ("confidence", 50.5)):
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    with self.db.transaction() as conn:
+                        conn.execute(
+                            f"UPDATE summaries SET {field}=? WHERE episode_id='e1'",
+                            (value,),
+                        )
+        self.assertEqual(self.repo.get_summary("e1"), valid)
+
+    def test_summary_repository_validates_even_at_the_persistence_boundary(self):
+        self.repo.create(self.episode)
+        invalid_records = (
+            SimpleNamespace(episode_id="e1", content="bad", read_time_min=1,
+                            key_points=True, confidence=50, generated_by="VIDA"),
+            SimpleNamespace(episode_id="e1", content="bad", read_time_min=1,
+                            key_points="1", confidence=50, generated_by="VIDA"),
+            SimpleNamespace(episode_id="e1", content="bad", read_time_min=1,
+                            key_points=1, confidence=None, generated_by="VIDA"),
+            SimpleNamespace(episode_id="e1", content="bad", read_time_min=1,
+                            key_points=1, confidence=True, generated_by="VIDA"),
+            SimpleNamespace(episode_id="e1", content="bad", read_time_min=1,
+                            key_points=1, confidence=50.5, generated_by="VIDA"),
+        )
+        for record in invalid_records:
+            with self.subTest(record=record):
+                with self.assertRaises((TypeError, ValueError)):
+                    self.repo.replace_summary("e1", record)
+        self.assertIsNone(self.repo.get_summary("e1"))
 
     def test_warnings_are_typed_and_json_is_the_only_denormalized_content(self):
         self.repo.create(self.episode)

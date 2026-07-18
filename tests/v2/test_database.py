@@ -1,6 +1,8 @@
 import sqlite3
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
 
@@ -57,7 +59,105 @@ class DatabaseTests(unittest.TestCase):
                 "SELECT version FROM schema_migrations"
             ).fetchall()
         self.assertEqual(count, 1)
-        self.assertEqual([row[0] for row in migrations], [1])
+        self.assertEqual([row[0] for row in migrations], [1, 2])
+
+    def test_version_two_migrates_legacy_summaries_and_is_idempotent(self):
+        with self.db.connect() as conn:
+            conn.executescript(
+                """DROP TABLE summaries;
+                CREATE TABLE summaries (
+                    episode_id TEXT PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    read_time_min INTEGER NOT NULL CHECK (read_time_min >= 0),
+                    key_points TEXT NOT NULL DEFAULT '[]'
+                        CHECK (json_valid(key_points) AND json_type(key_points) = 'array'),
+                    confidence REAL CHECK (confidence IS NULL OR confidence BETWEEN 0 AND 1),
+                    generated_by TEXT NOT NULL,
+                    FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE,
+                    FOREIGN KEY (generated_by) REFERENCES provider_profile_revisions(id)
+                );
+                DELETE FROM schema_migrations WHERE version > 1;
+                """
+            )
+        with self.db.transaction() as conn:
+            self._insert_profile_episode(conn)
+            conn.execute(
+                "INSERT INTO episodes"
+                "(id,title,source_type,source_url,status,progress,message,summary_language,"
+                "provider_profile_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "e2", "Episode 2", "url", "https://example.test/video-2", "queued",
+                    0, "Queued", "zh", "p1", NOW, NOW,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO summaries"
+                "(episode_id,content,read_time_min,key_points,confidence,generated_by) "
+                "VALUES(?,?,?,?,?,?)",
+                ("e1", "legacy", 2, '["one","two"]', 0.8, "r1"),
+            )
+            conn.execute(
+                "INSERT INTO summaries"
+                "(episode_id,content,read_time_min,key_points,confidence,generated_by) "
+                "VALUES(?,?,?,?,?,?)",
+                ("e2", "legacy null", 1, '[]', None, "r1"),
+            )
+
+        self.db.initialize()
+        self.db.initialize()
+
+        with self.db.connect() as conn:
+            versions = [
+                row[0] for row in conn.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                )
+            ]
+            summary = tuple(
+                conn.execute(
+                    "SELECT content,read_time_min,key_points,confidence,generated_by "
+                    "FROM summaries WHERE episode_id='e1'"
+                ).fetchone()
+            )
+            null_summary = tuple(
+                conn.execute(
+                    "SELECT key_points,confidence,generated_by "
+                    "FROM summaries WHERE episode_id='e2'"
+                ).fetchone()
+            )
+            columns = {
+                row[1]: (row[2], row[3]) for row in conn.execute("PRAGMA table_info(summaries)")
+            }
+        self.assertEqual(versions, [1, 2])
+        self.assertEqual(summary, ("legacy", 2, 2, 80, "VIDA"))
+        self.assertEqual(null_summary, (0, 0, "VIDA"))
+        self.assertEqual(columns["key_points"], ("INTEGER", 1))
+        self.assertEqual(columns["confidence"], ("INTEGER", 1))
+
+    def test_concurrent_initializers_apply_pending_migrations_without_failure(self):
+        concurrent_path = Path(self.temp.name) / "concurrent.sqlite3"
+        barrier = threading.Barrier(2)
+
+        def initialize():
+            barrier.wait()
+            Database(concurrent_path).initialize()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(initialize) for _ in range(2)]
+            for future in futures:
+                future.result(timeout=5)
+
+        with Database(concurrent_path).connect() as conn:
+            versions = [
+                row[0] for row in conn.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                )
+            ]
+            summary_columns = {
+                row[1]: (row[2], row[3])
+                for row in conn.execute("PRAGMA table_info(summaries)")
+            }
+        self.assertEqual(versions, [1, 2])
+        self.assertEqual(summary_columns["confidence"], ("INTEGER", 1))
 
     def test_every_connection_uses_required_pragmas(self):
         with self.db.connect() as conn:
