@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from backend.v2.crypto import CredentialCipher
-from backend.v2.repositories.provider_profiles import (
+from ..crypto import CredentialCipher
+from ..repositories.provider_profiles import (
     ProviderProfileRecord,
     ProviderProfileRepository,
 )

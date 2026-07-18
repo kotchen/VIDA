@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 from sqlite3 import Connection, Row
 from uuid import uuid4
 
-from backend.v2.crypto import EncryptedCredential
-from backend.v2.database import Database
+from ..crypto import EncryptedCredential
+from ..database import Database
 
 
 @dataclass(frozen=True)

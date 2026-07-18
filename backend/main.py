@@ -18,6 +18,7 @@ from transcriber import Transcriber
 from summarizer import Summarizer
 from translator import Translator
 from model_settings import validate_temperature
+from v2.bootstrap import install_v2
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -36,6 +37,8 @@ app.add_middleware(
 
 # 获取项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent
+
+v2_runtime = install_v2(app, PROJECT_ROOT)
 
 # 挂载静态文件
 app.mount("/static", StaticFiles(directory=str(PROJECT_ROOT / "static")), name="static")
