@@ -40,6 +40,9 @@ SummaryLanguageString = Annotated[
 EpisodeTitleString = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
 ]
+ChapterTitleString = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
+]
 EpisodeSourceUrl = Annotated[HttpUrl, UrlConstraints(max_length=2048)]
 
 
@@ -179,6 +182,45 @@ class ChapterResponse(ApiModel):
     duration_sec: float
     thumbnail_url: str | None
     bookmarked: bool
+
+
+class ChapterCreate(ApiModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start_sec: float = Field(ge=0, allow_inf_nan=False)
+    title: ChapterTitleString
+
+
+class ChapterUpdate(ApiModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start_sec: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    title: ChapterTitleString | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> "ChapterUpdate":
+        if not self.model_fields_set:
+            raise ValueError("at least one field must be provided")
+        if any(getattr(self, field) is None for field in self.model_fields_set):
+            raise ValueError("update fields must not be null")
+        return self
+
+
+class ProjectResponse(ApiModel):
+    id: str
+    title: str
+    created_at: str
+    duration_sec: float
+    status: str
+    thumbnail_url: str | None
+
+
+class DashboardResponse(ApiModel):
+    current_episode: EpisodeResponse | None
+    summary: SummaryResponse | None
+    transcript: list[TranscriptSegmentResponse]
+    chapters: list[ChapterResponse]
+    recent_projects: list[ProjectResponse]
 
 
 class JobResponse(ApiModel):

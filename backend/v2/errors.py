@@ -20,12 +20,14 @@ class V2Error(Exception):
         message: str,
         status_code: int,
         details: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ):
         super().__init__(message)
         self.code = code
         self.message = message
         self.status_code = status_code
         self.details = {} if details is None else details
+        self.headers = {} if headers is None else headers
 
 
 def install_v2_error_contract(app: FastAPI) -> None:
@@ -50,7 +52,9 @@ def install_v2_error_contract(app: FastAPI) -> None:
 
     @app.exception_handler(V2Error)
     async def handle_v2_error(request: Request, exc: V2Error) -> JSONResponse:
-        return _error_response(request, exc.code, exc.message, exc.status_code, exc.details)
+        return _error_response(
+            request, exc.code, exc.message, exc.status_code, exc.details, exc.headers
+        )
 
     @app.exception_handler(StarletteHTTPException)
     async def handle_http_error(request: Request, exc: StarletteHTTPException):
@@ -89,6 +93,7 @@ def _error_response(
     message: str,
     status_code: int,
     details: dict[str, Any],
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     request_id = getattr(request.state, "request_id", str(uuid4()))
     error: dict[str, Any] = {
@@ -97,10 +102,13 @@ def _error_response(
         "details": details,
         "requestId": request_id,
     }
+    response_headers = {"X-Request-ID": request_id}
+    if headers:
+        response_headers.update(headers)
     return JSONResponse(
         status_code=status_code,
         content={"error": error},
-        headers={"X-Request-ID": request_id},
+        headers=response_headers,
     )
 
 

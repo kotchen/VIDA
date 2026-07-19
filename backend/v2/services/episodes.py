@@ -114,6 +114,60 @@ class EpisodeService:
             raise RuntimeError("chapter repository is not configured")
         return self._chapters.list(episode_id)
 
+    def create_chapter(self, episode_id: str, start_sec: float, title: str) -> ChapterRecord:
+        episode = self.get_episode(episode_id)
+        if self._chapters is None:
+            raise RuntimeError("chapter repository is not configured")
+        if episode.duration_sec is None or start_sec > episode.duration_sec:
+            raise V2Error(
+                "validation_error", "Chapter start is outside episode duration", 422, {}
+            )
+        try:
+            return self._chapters.create_manual_derived(
+                episode_id, start_sec, title, episode.poster_path
+            )
+        except ValueError:
+            raise V2Error(
+                "validation_error", "Chapter start is outside episode duration", 422, {}
+            ) from None
+
+    def update_chapter(
+        self, episode_id: str, chapter_id: str,
+        *, start_sec: float | None, title: str | None,
+    ) -> ChapterRecord:
+        episode = self.get_episode(episode_id)
+        if self._chapters is None:
+            raise RuntimeError("chapter repository is not configured")
+        if start_sec is not None and (
+            episode.duration_sec is None or start_sec > episode.duration_sec
+        ):
+            raise V2Error(
+                "validation_error", "Chapter start is outside episode duration", 422, {}
+            )
+        try:
+            return self._chapters.update_manual(
+                episode_id, chapter_id, start_sec=start_sec, title=title
+            )
+        except KeyError:
+            raise V2Error("chapter_not_found", "Chapter not found", 404, {}) from None
+        except PermissionError:
+            raise V2Error(
+                "generated_chapter_immutable", "Generated chapters cannot be edited", 409, {}
+            ) from None
+
+    def delete_chapter(self, episode_id: str, chapter_id: str) -> None:
+        self.get_episode(episode_id)
+        if self._chapters is None:
+            raise RuntimeError("chapter repository is not configured")
+        try:
+            self._chapters.delete_manual(episode_id, chapter_id)
+        except KeyError:
+            raise V2Error("chapter_not_found", "Chapter not found", 404, {}) from None
+        except PermissionError:
+            raise V2Error(
+                "generated_chapter_immutable", "Generated chapters cannot be deleted", 409, {}
+            ) from None
+
     def get_job(self, job_id: str) -> JobRecord:
         self._require_control_dependencies()
         job = self._jobs.get(job_id)

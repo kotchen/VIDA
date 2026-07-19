@@ -47,6 +47,72 @@ class ChapterRepository:
             _insert_chapter(conn, chapter, _utc_now())
         return chapter
 
+    def create_manual_derived(
+        self,
+        episode_id: str,
+        start_sec: float,
+        title: str,
+        thumbnail_path: str | None,
+    ) -> ChapterRecord:
+        with self._database.transaction(immediate=True) as conn:
+            duration = _duration_to_next_or_end(conn, episode_id, start_sec)
+            chapter = ChapterRecord(
+                str(uuid4()), episode_id, start_sec, title, duration,
+                thumbnail_path, False, "manual",
+            )
+            _insert_chapter(conn, chapter, _utc_now())
+        return chapter
+
+    def update_manual(
+        self,
+        episode_id: str,
+        chapter_id: str,
+        *,
+        start_sec: float | None = None,
+        title: str | None = None,
+    ) -> ChapterRecord:
+        with self._database.transaction(immediate=True) as conn:
+            _require_episode(conn, episode_id)
+            row = conn.execute(
+                "SELECT id,episode_id,start_sec,title,duration_sec,thumbnail_path,"
+                "bookmarked,source FROM chapters WHERE id=? AND episode_id=?",
+                (chapter_id, episode_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(chapter_id)
+            if row["source"] != "manual":
+                raise PermissionError(chapter_id)
+            new_start = row["start_sec"] if start_sec is None else start_sec
+            new_title = row["title"] if title is None else title
+            duration = _duration_to_next_or_end(
+                conn, episode_id, new_start, excluding_id=chapter_id
+            )
+            conn.execute(
+                "UPDATE chapters SET start_sec=?,title=?,duration_sec=? "
+                "WHERE id=? AND episode_id=? AND source='manual'",
+                (new_start, new_title, duration, chapter_id, episode_id),
+            )
+            return ChapterRecord(
+                chapter_id, episode_id, new_start, new_title, duration,
+                row["thumbnail_path"], bool(row["bookmarked"]), "manual",
+            )
+
+    def delete_manual(self, episode_id: str, chapter_id: str) -> None:
+        with self._database.transaction(immediate=True) as conn:
+            _require_episode(conn, episode_id)
+            row = conn.execute(
+                "SELECT source FROM chapters WHERE id=? AND episode_id=?",
+                (chapter_id, episode_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(chapter_id)
+            if row["source"] != "manual":
+                raise PermissionError(chapter_id)
+            conn.execute(
+                "DELETE FROM chapters WHERE id=? AND episode_id=? AND source='manual'",
+                (chapter_id, episode_id),
+            )
+
     def replace_generated(
         self, episode_id: str, chapters: Iterable[ChapterRecord]
     ) -> None:
@@ -69,6 +135,31 @@ class ChapterRepository:
 def _require_episode(conn, episode_id: str) -> None:
     if conn.execute("SELECT 1 FROM episodes WHERE id=?", (episode_id,)).fetchone() is None:
         raise KeyError(episode_id)
+
+
+def _duration_to_next_or_end(
+    conn, episode_id: str, start_sec: float, excluding_id: str | None = None
+) -> float:
+    episode = conn.execute(
+        "SELECT duration_sec FROM episodes WHERE id=?", (episode_id,)
+    ).fetchone()
+    if episode is None:
+        raise KeyError(episode_id)
+    end = episode["duration_sec"]
+    if end is None or start_sec > end:
+        raise ValueError("chapter start is outside episode duration")
+    query = (
+        "SELECT start_sec FROM chapters WHERE episode_id=? AND start_sec>?"
+        + (" AND id<>?" if excluding_id is not None else "")
+        + " ORDER BY start_sec,id LIMIT 1"
+    )
+    parameters = (
+        (episode_id, start_sec, excluding_id)
+        if excluding_id is not None else (episode_id, start_sec)
+    )
+    following = conn.execute(query, parameters).fetchone()
+    next_start = end if following is None else min(end, following["start_sec"])
+    return max(0.0, next_start - start_sec)
 
 
 def _insert_chapter(conn, chapter: ChapterRecord, created_at: str) -> None:

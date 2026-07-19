@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
 import shutil
+import stat
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import BinaryIO, Protocol
 
 
 class UnsafeMediaPath(ValueError):
@@ -12,6 +15,17 @@ class UnsafeMediaPath(ValueError):
 
 class PathReferenceRepository(Protocol):
     def committed_paths(self) -> Iterable[str | None]: ...
+
+
+@dataclass
+class OpenMediaFile:
+    file: BinaryIO
+    size: int
+    mtime: float
+    mtime_ns: int
+
+    def close(self) -> None:
+        self.file.close()
 
 
 class MediaService:
@@ -38,6 +52,64 @@ class MediaService:
             raise UnsafeMediaPath("staged media must be a regular file")
         destination.parent.mkdir(parents=True, exist_ok=True)
         source.replace(destination)
+
+    def open_owned_file(
+        self, episode_id: str, stored_path: str | None, kind: str
+    ) -> OpenMediaFile:
+        if not stored_path or kind not in {"media", "poster"}:
+            raise UnsafeMediaPath("media path is unavailable")
+        relative = Path(stored_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise UnsafeMediaPath("repository path must be relative")
+        allowed_folder = "artifacts" if kind == "media" else "poster"
+        if (
+            len(relative.parts) < 4
+            or relative.parts[0] != "episodes"
+            or relative.parts[1] != episode_id
+            or relative.parts[2] != allowed_folder
+        ):
+            raise UnsafeMediaPath("repository path crosses ownership boundary")
+        candidate = self._data_dir.joinpath(*relative.parts)
+        if self._has_symlink_component(candidate):
+            raise UnsafeMediaPath("media path contains a symlink")
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            raise UnsafeMediaPath("media file does not exist") from None
+        if self._data_dir not in resolved.parents:
+            raise UnsafeMediaPath("media path escapes data/v2")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(candidate, flags)
+        except OSError:
+            raise UnsafeMediaPath("media file cannot be opened") from None
+        try:
+            opened = os.fstat(descriptor)
+            lexical = os.stat(candidate, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or not stat.S_ISREG(lexical.st_mode)
+                or (opened.st_dev, opened.st_ino) != (lexical.st_dev, lexical.st_ino)
+                or candidate.resolve(strict=True) != resolved
+            ):
+                raise UnsafeMediaPath("media file changed during open")
+            return OpenMediaFile(
+                os.fdopen(descriptor, "rb", closefd=True),
+                opened.st_size,
+                opened.st_mtime,
+                opened.st_mtime_ns,
+            )
+        except UnsafeMediaPath:
+            os.close(descriptor)
+            raise
+        except OSError:
+            os.close(descriptor)
+            raise UnsafeMediaPath("media file changed during open") from None
+        except BaseException:
+            os.close(descriptor)
+            raise
 
     def reconcile_orphans(self) -> None:
         self._data_dir.mkdir(parents=True, exist_ok=True)
