@@ -191,7 +191,6 @@ class JobResponse(ApiModel):
     submitted_at: str
     started_at: str | None
     finished_at: str | None
-    cancel_requested_at: str | None
     progress: int
     message: str
     queue_position: int | None

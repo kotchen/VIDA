@@ -224,7 +224,7 @@ def _job_response(job, queue_position: int | None) -> JobResponse:
         status=job.status,
         provider_profile_revision_id=job.provider_profile_revision_id,
         submitted_at=job.submitted_at, started_at=job.started_at,
-        finished_at=job.finished_at, cancel_requested_at=job.cancel_requested_at,
+        finished_at=job.finished_at,
         progress=job.progress, message=job.message, queue_position=queue_position,
         error_code=job.error_code, error_message=job.error_message,
     )

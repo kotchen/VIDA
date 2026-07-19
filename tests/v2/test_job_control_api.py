@@ -59,7 +59,13 @@ class JobControlApiTests(unittest.TestCase):
         response = self.client.post(f"/api/v2/jobs/{job_id}/cancel")
         detail = self.client.get(f"/api/v2/jobs/{job_id}")
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(detail.json()["cancelRequestedAt"], response.json()["cancelRequestedAt"])
+        self.assertNotIn("cancelRequestedAt", response.json())
+        self.assertNotIn("cancelRequestedAt", detail.json())
+        self.assertEqual(set(detail.json()), {
+            "id", "episodeId", "type", "attempt", "status",
+            "providerProfileRevisionId", "submittedAt", "startedAt", "finishedAt",
+            "progress", "message", "queuePosition", "errorCode", "errorMessage",
+        })
         self.assertEqual(detail.json()["attempt"], 1)
         self.assertIsNone(detail.json()["queuePosition"])
 

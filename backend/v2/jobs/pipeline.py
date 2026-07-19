@@ -219,11 +219,14 @@ class EpisodePipeline:
                     episode.id, optimized, episode.summary_language, episode.title
                 ),
             )
-            await self._stage(
-                job, 90, "Saving summary", cancel_check,
-                run_owned_to_thread(
-                    self._episodes.replace_summary, episode.id, summary
-                ),
+            await self._complete_regeneration(
+                job,
+                "Saving summary",
+                cancel_check,
+                self._jobs.complete_regeneration_summary,
+                job.id,
+                summary,
+                self._now(),
             )
         else:
             generated = await self._stage(
@@ -235,15 +238,28 @@ class EpisodePipeline:
                     episode.poster_path,
                 ),
             )
-            await self._stage(
-                job, 90, "Saving chapters", cancel_check,
-                run_owned_to_thread(
-                    self._chapters.replace_generated, episode.id, generated
-                ),
+            await self._complete_regeneration(
+                job,
+                "Saving chapters",
+                cancel_check,
+                self._jobs.complete_regeneration_chapters,
+                job.id,
+                generated,
+                self._now(),
             )
+
+    async def _complete_regeneration(
+        self, job, message: str, cancel_check, operation, *args
+    ) -> None:
         self._check_cancel(cancel_check)
         try:
-            await run_owned_to_thread(self._jobs.complete, job.id, self._now())
+            canceled, _ = await self._update_progress(job.id, 90, message)
+            if canceled:
+                raise asyncio.CancelledError
+            self._check_cancel(cancel_check)
+            await run_owned_to_thread(operation, *args)
+        except JobCanceled:
+            raise
         except asyncio.CancelledError:
             raise
         except Exception:

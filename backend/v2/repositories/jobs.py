@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from sqlite3 import Connection, Row
 
 from ..database import Database
-from ..domain import InvalidJobState, JobRecord
+from ..domain import ChapterRecord, InvalidJobState, JobRecord, SummaryRecord
 
 
 class JobRepository:
@@ -194,6 +194,71 @@ class JobRepository:
             job_id, "canceled", now, message="Canceled", require_cancel_requested=True
         )
 
+    def complete_regeneration_summary(
+        self, job_id: str, summary: SummaryRecord, now: str
+    ) -> JobRecord:
+        _validate_summary(summary)
+        with self._database.transaction(immediate=True) as conn:
+            row = _require_job(conn, job_id)
+            _require_processing(row)
+            if row["type"] != "regenerate_summary" or summary.episode_id != row["episode_id"]:
+                raise InvalidJobState(job_id, row["status"])
+            if row["cancel_requested_at"] is not None:
+                return _finish_in_connection(conn, row, "canceled", now, message="Canceled")
+            _require_regeneration_ownership(conn, row)
+            conn.execute("DELETE FROM summaries WHERE episode_id=?", (row["episode_id"],))
+            conn.execute(
+                "INSERT INTO summaries"
+                "(episode_id,content,read_time_min,key_points,confidence,generated_by) "
+                "VALUES(?,?,?,?,?,?)",
+                (
+                    summary.episode_id, summary.content, summary.read_time_min,
+                    summary.key_points, summary.confidence, summary.generated_by,
+                ),
+            )
+            return _finish_in_connection(
+                conn, row, "completed", now, progress=100, message="Completed"
+            )
+
+    def complete_regeneration_chapters(
+        self, job_id: str, chapters, now: str
+    ) -> JobRecord:
+        records = list(chapters)
+        with self._database.transaction(immediate=True) as conn:
+            row = _require_job(conn, job_id)
+            _require_processing(row)
+            if row["type"] != "regenerate_chapters":
+                raise InvalidJobState(job_id, row["status"])
+            if any(
+                not isinstance(chapter, ChapterRecord)
+                or chapter.episode_id != row["episode_id"]
+                or chapter.source != "generated"
+                for chapter in records
+            ):
+                raise ValueError("invalid generated chapter replacement")
+            if row["cancel_requested_at"] is not None:
+                return _finish_in_connection(conn, row, "canceled", now, message="Canceled")
+            _require_regeneration_ownership(conn, row)
+            conn.execute(
+                "DELETE FROM chapters WHERE episode_id=? AND source='generated'",
+                (row["episode_id"],),
+            )
+            for chapter in sorted(records, key=lambda value: (value.start_sec, value.id)):
+                conn.execute(
+                    "INSERT INTO chapters"
+                    "(id,episode_id,start_sec,title,duration_sec,thumbnail_path,"
+                    "thumbnail_content_type,bookmarked,source,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        chapter.id, chapter.episode_id, chapter.start_sec, chapter.title,
+                        chapter.duration_sec, chapter.thumbnail_path, None,
+                        int(chapter.bookmarked), chapter.source, now,
+                    ),
+                )
+            return _finish_in_connection(
+                conn, row, "completed", now, progress=100, message="Completed"
+            )
+
     def _finish(
         self,
         job_id: str,
@@ -212,24 +277,19 @@ class JobRepository:
             if require_cancel_requested and row["cancel_requested_at"] is None:
                 raise InvalidJobState(job_id, row["status"])
             _require_episode_ownership(conn, row)
-            terminal_progress = row["progress"] if progress is None else progress
-            changed = conn.execute(
-                "UPDATE jobs SET status=?,finished_at=?,heartbeat_at=?,progress=?,message=?,"
-                "error_code=?,error_message=? WHERE id=? AND status='processing'",
-                (status, now, now, terminal_progress, message, error_code,
-                 error_message, job_id),
-            ).rowcount
-            if changed != 1:
+            if (
+                row["type"] != "process_episode"
+                and status == "completed"
+                and row["cancel_requested_at"] is None
+            ):
                 raise InvalidJobState(job_id, row["status"])
-            if row["type"] == "process_episode":
-                conn.execute(
-                    "UPDATE episodes SET status=?,progress=?,message=?,error_code=?,"
-                    "error_message=?,completed_at=?,updated_at=? "
-                    "WHERE id=? AND current_job_id=?",
-                    (status, terminal_progress, message, error_code, error_message,
-                     now, now, row["episode_id"], job_id),
-                )
-            return _job_from_row(_require_job(conn, job_id))
+            if row["cancel_requested_at"] is not None and status != "canceled":
+                status, progress, message = "canceled", None, "Canceled"
+                error_code = error_message = None
+            return _finish_in_connection(
+                conn, row, status, now, progress=progress, message=message,
+                error_code=error_code, error_message=error_message,
+            )
 
     def recover_interrupted(self, message: str) -> int:
         now = _utc_now()
@@ -341,6 +401,66 @@ def _require_episode_ownership(conn: Connection, row: Row) -> None:
     ).fetchone()
     if owns_episode is None:
         raise InvalidJobState(row["id"], row["status"])
+
+
+def _require_regeneration_ownership(conn: Connection, row: Row) -> None:
+    owns = conn.execute(
+        "SELECT 1 FROM episodes AS e JOIN jobs AS primary_job "
+        "ON primary_job.id=e.current_job_id AND primary_job.episode_id=e.id "
+        "WHERE e.id=? AND e.status='completed' "
+        "AND primary_job.type='process_episode' AND primary_job.status='completed'",
+        (row["episode_id"],),
+    ).fetchone()
+    if owns is None:
+        raise InvalidJobState(row["id"], row["status"])
+
+
+def _finish_in_connection(
+    conn: Connection,
+    row: Row,
+    status: str,
+    now: str,
+    *,
+    progress: int | None = None,
+    message: str,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> JobRecord:
+    terminal_progress = row["progress"] if progress is None else progress
+    changed = conn.execute(
+        "UPDATE jobs SET status=?,finished_at=?,heartbeat_at=?,progress=?,message=?,"
+        "error_code=?,error_message=? WHERE id=? AND status='processing'",
+        (
+            status, now, now, terminal_progress, message, error_code,
+            error_message, row["id"],
+        ),
+    ).rowcount
+    if changed != 1:
+        raise InvalidJobState(row["id"], row["status"])
+    if row["type"] == "process_episode":
+        changed = conn.execute(
+            "UPDATE episodes SET status=?,progress=?,message=?,error_code=?,"
+            "error_message=?,completed_at=?,updated_at=? "
+            "WHERE id=? AND current_job_id=?",
+            (
+                status, terminal_progress, message, error_code, error_message,
+                now, now, row["episode_id"], row["id"],
+            ),
+        ).rowcount
+        if changed != 1:
+            raise InvalidJobState(row["id"], row["status"])
+    return _job_from_row(_require_job(conn, row["id"]))
+
+
+def _validate_summary(summary: SummaryRecord) -> None:
+    if not isinstance(summary, SummaryRecord):
+        raise TypeError("summary must be a SummaryRecord")
+    if type(summary.key_points) is not int or summary.key_points < 0:
+        raise ValueError("summary key_points must be a non-negative integer")
+    if type(summary.confidence) is not int or not 0 <= summary.confidence <= 100:
+        raise ValueError("summary confidence must be an integer percentage")
+    if summary.generated_by != "VIDA":
+        raise ValueError("summary generated_by must be VIDA")
 
 
 def _job_from_row(row: Row) -> JobRecord:

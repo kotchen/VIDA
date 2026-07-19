@@ -268,6 +268,66 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((failed.status, failed.error_code), ("failed", "job_execution_failed"))
         self.assertNotIn("secret", failed.error_message)
 
+    async def test_regeneration_completion_failure_rolls_back_new_summary(self):
+        pipeline, _ = self.make_pipeline(AI())
+        await pipeline.execute(self.job, lambda: False)
+        old = SummaryRecord("episode-1", "Old", 1, 1, 80, "VIDA")
+        self.episodes.replace_summary("episode-1", old)
+        job = JobRecord(
+            "regen-atomic-fail", "episode-1", "regenerate_summary", 2, "queued",
+            self.credentials.id, NOW, None, None, None, None, None, 0, "Queued", None, None,
+        )
+        self.jobs.enqueue(job)
+        claimed = self.jobs.claim_next("worker-2", NOW)
+        with self.database.transaction() as conn:
+            conn.execute(
+                "CREATE TRIGGER reject_pipeline_regen_completion "
+                "BEFORE UPDATE OF status ON jobs "
+                "WHEN OLD.id='regen-atomic-fail' AND NEW.status='completed' "
+                "BEGIN SELECT RAISE(ABORT, 'completion rejected'); END"
+            )
+        regen, _ = self.make_pipeline(AI())
+
+        with self.assertRaises(PipelinePersistenceError):
+            await regen.execute(claimed, lambda: False)
+
+        self.assertEqual(self.episodes.get_summary("episode-1"), old)
+        self.assertEqual(self.jobs.get_required(job.id).status, "processing")
+
+    async def test_accepted_cancel_during_regeneration_save_wins_and_scheduler_accepts(self):
+        pipeline, _ = self.make_pipeline(AI())
+        await pipeline.execute(self.job, lambda: False)
+        old = SummaryRecord("episode-1", "Old", 1, 1, 80, "VIDA")
+        self.episodes.replace_summary("episode-1", old)
+        job = JobRecord(
+            "regen-cancel-save", "episode-1", "regenerate_summary", 2, "queued",
+            self.credentials.id, NOW, None, None, None, None, None, 0, "Queued", None, None,
+        )
+        self.jobs.enqueue(job)
+        claimed = self.jobs.claim_next("worker-2", NOW)
+        started = threading.Event()
+        release = threading.Event()
+        original = self.jobs.complete_regeneration_summary
+
+        def blocked_complete(*args, **kwargs):
+            started.set()
+            release.wait(timeout=2)
+            return original(*args, **kwargs)
+
+        self.jobs.complete_regeneration_summary = blocked_complete
+        regen, _ = self.make_pipeline(AI())
+        scheduler = Scheduler(self.jobs, regen, max_workers=1, poll_interval_sec=0.01)
+        execution = asyncio.create_task(scheduler._execute(claimed))
+        self.assertTrue(await asyncio.to_thread(started.wait, 1))
+        accepted = self.jobs.request_cancel(job.id, "2026-07-19T00:01:00Z")
+        release.set()
+
+        await execution
+
+        self.assertEqual(accepted.status, "processing")
+        self.assertEqual(self.jobs.get_required(job.id).status, "canceled")
+        self.assertEqual(self.episodes.get_summary("episode-1"), old)
+
     async def test_cancel_immediately_after_core_commit_keeps_new_references(self):
         self._seed_old_media()
         canceled = False

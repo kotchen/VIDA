@@ -8,7 +8,9 @@ from dataclasses import replace
 from pathlib import Path
 
 from backend.v2.database import Database
-from backend.v2.domain import InvalidJobState, JobRecord
+from backend.v2.domain import ChapterRecord, InvalidJobState, JobRecord, SummaryRecord
+from backend.v2.repositories.chapters import ChapterRepository
+from backend.v2.repositories.episodes import EpisodeRepository
 from backend.v2.repositories.jobs import JobRepository
 
 
@@ -331,6 +333,238 @@ class JobRepositoryTests(unittest.TestCase):
         repeated = self.repo.request_cancel("j1", "2026-07-18T00:03:00Z")
         self.assertEqual(repeated.cancel_requested_at, "2026-07-18T00:02:00Z")
 
+    def test_accepted_process_cancel_wins_over_later_complete_and_fail(self):
+        for terminal in ("complete", "fail"):
+            with self.subTest(terminal=terminal):
+                self._reset_database()
+                self._episode("e1")
+                self.repo.enqueue(self._job("e1", "j1"))
+                self.repo.claim_next("worker", "2026-07-18T00:01:00Z")
+                self.repo.request_cancel("j1", "2026-07-18T00:02:00Z")
+
+                result = (
+                    self.repo.complete("j1", "2026-07-18T00:03:00Z")
+                    if terminal == "complete"
+                    else self.repo.fail(
+                        "j1", "secret_failure", "Secret failure",
+                        "2026-07-18T00:03:00Z",
+                    )
+                )
+
+                self.assertEqual((result.status, result.message), ("canceled", "Canceled"))
+                episode = self._episode_row("e1")
+                self.assertEqual((episode["status"], episode["message"]),
+                                 ("canceled", "Canceled"))
+                self.assertEqual(
+                    self.repo.request_cancel("j1", "2026-07-18T00:03:30Z").status,
+                    "canceled",
+                )
+                with self.assertRaises(InvalidJobState):
+                    self.repo.complete("j1", "2026-07-18T00:04:00Z")
+
+    def test_terminal_transition_before_cancel_is_the_only_terminal_result(self):
+        self._episode("e1")
+        self.repo.enqueue(self._job("e1", "j1"))
+        self.repo.claim_next("worker", "2026-07-18T00:01:00Z")
+        completed = self.repo.complete("j1", "2026-07-18T00:02:00Z")
+
+        with self.assertRaises(InvalidJobState):
+            self.repo.request_cancel("j1", "2026-07-18T00:03:00Z")
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(self.repo.get_required("j1").status, "completed")
+
+    def test_concurrent_cancel_and_terminal_races_have_one_valid_terminal_state(self):
+        for terminal in ("complete", "fail"):
+            with self.subTest(terminal=terminal):
+                self._reset_database()
+                self._episode("e1")
+                self.repo.enqueue(self._job("e1", "j1"))
+                self.repo.claim_next("worker", "2026-07-18T00:01:00Z")
+                barrier = threading.Barrier(3)
+                results = []
+                errors = []
+
+                def cancel():
+                    barrier.wait()
+                    try:
+                        results.append(self.repo.request_cancel(
+                            "j1", "2026-07-18T00:02:00Z"
+                        ))
+                    except BaseException as exc:
+                        errors.append(exc)
+
+                def finish():
+                    barrier.wait()
+                    try:
+                        results.append(
+                            self.repo.complete("j1", "2026-07-18T00:03:00Z")
+                            if terminal == "complete"
+                            else self.repo.fail(
+                                "j1", "failed", "Failed",
+                                "2026-07-18T00:03:00Z",
+                            )
+                        )
+                    except BaseException as exc:
+                        errors.append(exc)
+
+                threads = [threading.Thread(target=cancel), threading.Thread(target=finish)]
+                for thread in threads:
+                    thread.start()
+                barrier.wait()
+                for thread in threads:
+                    thread.join()
+
+                final = self.repo.get_required("j1")
+                episode = self._episode_row("e1")
+                expected_terminal = "completed" if terminal == "complete" else "failed"
+                self.assertIn(final.status, {"canceled", expected_terminal})
+                self.assertEqual(episode["status"], final.status)
+                self.assertTrue(all(isinstance(error, InvalidJobState) for error in errors))
+                self.assertTrue(
+                    all(result.status in {"processing", final.status} for result in results)
+                )
+                if any(result.status == "processing" for result in results):
+                    self.assertEqual(final.status, "canceled")
+
+    def test_accepted_regeneration_cancel_leaves_episode_completed_on_fail(self):
+        self._episode("e1", status="completed", progress=100, message="Completed")
+        job = replace(self._job("e1", "j1"), type="regenerate_summary")
+        self.repo.enqueue(job)
+        self.repo.claim_next("worker", "2026-07-18T00:01:00Z")
+        self.repo.request_cancel("j1", "2026-07-18T00:02:00Z")
+
+        result = self.repo.fail(
+            "j1", "provider_failure", "Provider failure", "2026-07-18T00:03:00Z"
+        )
+
+        self.assertEqual(result.status, "canceled")
+        episode = self._episode_row("e1")
+        self.assertEqual((episode["status"], episode["message"]),
+                         ("completed", "Completed"))
+
+    def test_summary_regeneration_replacement_and_completion_are_atomic(self):
+        job = self._processing_regeneration("regenerate_summary")
+        episodes = EpisodeRepository(self.db)
+        old = SummaryRecord("e1", "Old", 1, 1, 80, "VIDA")
+        episodes.replace_summary("e1", old)
+        new = SummaryRecord("e1", "New", 2, 2, 90, "VIDA")
+
+        completed = self.repo.complete_regeneration_summary(job.id, new, NOW)
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(episodes.get_summary("e1"), new)
+
+    def test_plain_completion_cannot_bypass_regeneration_atomic_boundary(self):
+        job = self._processing_regeneration("regenerate_summary")
+
+        with self.assertRaises(InvalidJobState):
+            self.repo.complete(job.id, NOW)
+
+        self.assertEqual(self.repo.get_required(job.id).status, "processing")
+
+    def test_summary_completion_failure_rolls_back_replacement(self):
+        job = self._processing_regeneration("regenerate_summary")
+        episodes = EpisodeRepository(self.db)
+        old = SummaryRecord("e1", "Old", 1, 1, 80, "VIDA")
+        episodes.replace_summary("e1", old)
+        with self.db.transaction() as conn:
+            conn.execute(
+                "CREATE TRIGGER reject_regen_completion BEFORE UPDATE OF status ON jobs "
+                "WHEN OLD.id='j2' AND NEW.status='completed' "
+                "BEGIN SELECT RAISE(ABORT, 'completion rejected'); END"
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.repo.complete_regeneration_summary(
+                job.id, SummaryRecord("e1", "New", 2, 2, 90, "VIDA"), NOW
+            )
+
+        self.assertEqual(episodes.get_summary("e1"), old)
+        self.assertEqual(self.repo.get_required(job.id).status, "processing")
+
+    def test_canceled_summary_regeneration_preserves_old_content(self):
+        job = self._processing_regeneration("regenerate_summary")
+        episodes = EpisodeRepository(self.db)
+        old = SummaryRecord("e1", "Old", 1, 1, 80, "VIDA")
+        episodes.replace_summary("e1", old)
+        self.repo.request_cancel(job.id, "2026-07-18T00:02:00Z")
+
+        result = self.repo.complete_regeneration_summary(
+            job.id, SummaryRecord("e1", "New", 2, 2, 90, "VIDA"), NOW
+        )
+
+        self.assertEqual(result.status, "canceled")
+        self.assertEqual(episodes.get_summary("e1"), old)
+
+    def test_chapter_regeneration_completion_preserves_manual_and_is_atomic(self):
+        job = self._processing_regeneration("regenerate_chapters")
+        chapters = ChapterRepository(self.db)
+        manual = chapters.create_manual("e1", 5, "Manual", 1, None, True)
+        old = ChapterRecord("old", "e1", 0, "Old", 2, None, False, "generated")
+        chapters.replace_generated("e1", [old])
+        generated = ChapterRecord(
+            "new", "e1", 1, "New", 2, None, False, "generated"
+        )
+
+        completed = self.repo.complete_regeneration_chapters(job.id, [generated], NOW)
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(chapters.list("e1"), [generated, manual])
+
+    def test_chapter_completion_failure_rolls_back_generated_replacement(self):
+        job = self._processing_regeneration("regenerate_chapters")
+        chapters = ChapterRepository(self.db)
+        old = ChapterRecord("old", "e1", 0, "Old", 2, None, False, "generated")
+        chapters.replace_generated("e1", [old])
+        with self.db.transaction() as conn:
+            conn.execute(
+                "CREATE TRIGGER reject_chapter_regen_completion "
+                "BEFORE UPDATE OF status ON jobs "
+                "WHEN OLD.id='j2' AND NEW.status='completed' "
+                "BEGIN SELECT RAISE(ABORT, 'completion rejected'); END"
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.repo.complete_regeneration_chapters(
+                job.id,
+                [ChapterRecord("new", "e1", 1, "New", 2, None, False, "generated")],
+                NOW,
+            )
+
+        self.assertEqual(chapters.list("e1"), [old])
+        self.assertEqual(self.repo.get_required(job.id).status, "processing")
+
+    def test_cancel_after_atomic_regeneration_completion_is_not_accepted(self):
+        job = self._processing_regeneration("regenerate_summary")
+        episodes = EpisodeRepository(self.db)
+        old = SummaryRecord("e1", "Old", 1, 1, 80, "VIDA")
+        new = SummaryRecord("e1", "New", 2, 2, 90, "VIDA")
+        episodes.replace_summary("e1", old)
+        completed = self.repo.complete_regeneration_summary(job.id, new, NOW)
+
+        with self.assertRaises(InvalidJobState):
+            self.repo.request_cancel(job.id, "2026-07-18T00:05:00Z")
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(episodes.get_summary("e1"), new)
+
+    def test_regeneration_completion_rejects_lost_primary_ownership(self):
+        job = self._processing_regeneration("regenerate_summary")
+        episodes = EpisodeRepository(self.db)
+        old = SummaryRecord("e1", "Old", 1, 1, 80, "VIDA")
+        episodes.replace_summary("e1", old)
+        with self.db.transaction() as conn:
+            conn.execute("UPDATE episodes SET current_job_id=NULL WHERE id='e1'")
+
+        with self.assertRaises(InvalidJobState):
+            self.repo.complete_regeneration_summary(
+                job.id, SummaryRecord("e1", "New", 2, 2, 90, "VIDA"), NOW
+            )
+
+        self.assertEqual(episodes.get_summary("e1"), old)
+        self.assertEqual(self.repo.get_required(job.id).status, "processing")
+
     def test_stale_episode_cancel_cannot_cancel_replacement_attempt(self):
         self._episode("e1")
         self.repo.enqueue(self._job("e1", "j1"))
@@ -539,6 +773,18 @@ class JobRepositoryTests(unittest.TestCase):
     def _episode_row(self, episode_id: str):
         with self.db.connect() as conn:
             return conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+
+    def _processing_regeneration(self, job_type: str) -> JobRecord:
+        self._episode("e1")
+        self.repo.enqueue(self._job("e1", "j1"))
+        self.repo.claim_next("worker", "2026-07-18T00:00:01Z")
+        self.repo.complete("j1", "2026-07-18T00:00:02Z")
+        regeneration = replace(
+            self._job("e1", "j2", attempt=2, submitted_at="2026-07-18T00:00:03Z"),
+            type=job_type,
+        )
+        self.repo.enqueue(regeneration)
+        return self.repo.claim_next("worker", "2026-07-18T00:00:04Z")
 
     def _reset_database(self) -> None:
         self.temp.cleanup()

@@ -217,6 +217,8 @@ class Scheduler:
             current = await self._repository_call(self._jobs.get_required, job.id)
             if current.status == "processing":
                 await self._repository_call(self._jobs.complete, job.id, _utc_now())
+            elif current.status == "canceled" and current.cancel_requested_at is not None:
+                return
             elif current.status != "completed":
                 raise RuntimeError("executor returned after a non-success terminal state")
 
