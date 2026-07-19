@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 
 from backend.v2.jobs.models import JobCanceled
-from backend.v2.jobs.source_ingest import DownloadError, PinnedHTTPClient, SecureDownloader
+from backend.v2.jobs.source_ingest import (
+    DownloadError, PinnedHTTPClient, SecureDownloader, TimeoutPolicy,
+)
 
 
 class FakeResolver:
@@ -28,7 +30,7 @@ class FakeResponse:
         self.peer_ip = peer_ip
         self.closed = False
 
-    async def iter_bytes(self):
+    async def iter_bytes(self, max_bytes=None):
         for chunk in self.chunks:
             yield chunk
 
@@ -41,7 +43,7 @@ class BlockingResponse(FakeResponse):
         super().__init__()
         self.started = asyncio.Event()
 
-    async def iter_bytes(self):
+    async def iter_bytes(self, max_bytes=None):
         self.started.set()
         await asyncio.Event().wait()
         yield b"unreachable"
@@ -77,7 +79,10 @@ class SecureDownloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.closed)
 
     async def test_rejects_private_loopback_link_local_and_mixed_dns_answers_before_connect(self):
-        for addresses in (["127.0.0.1"], ["169.254.1.1"], ["8.8.8.8", "10.0.0.1"]):
+        for addresses in (
+            ["127.0.0.1"], ["169.254.1.1"], ["224.0.0.1"], ["240.0.0.1"],
+            ["::ffff:127.0.0.1"], ["8.8.8.8", "10.0.0.1"],
+        ):
             with self.subTest(addresses=addresses):
                 client = FakeClient([])
                 with self.assertRaisesRegex(DownloadError, "not allowed"):
@@ -120,7 +125,8 @@ class SecureDownloadTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(expected):
                     await downloader.download("https://example.com/a", self.directory, cancel)
                 self.assertFalse(any(self.directory.glob("*.part")))
-                self.assertTrue(response.closed)
+                if expected is DownloadError:
+                    self.assertTrue(response.closed)
 
     async def test_cooperative_cancel_interrupts_a_stalled_response_and_cleans_part(self):
         response = BlockingResponse()
@@ -159,6 +165,17 @@ class SecureDownloadTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(DownloadError, "media type"):
             await SecureDownloader(FakeResolver([["8.8.8.8"]]), FakeClient([html])).download(
                 "https://example.com/a", self.directory, lambda: False
+            )
+        manifest = FakeResponse(headers={"content-type": "audio/x-mpegurl"}, chunks=[b"http://127.0.0.1/"])
+        with self.assertRaisesRegex(DownloadError, "media type"):
+            await SecureDownloader(FakeResolver([["8.8.8.8"]]), FakeClient([manifest])).download(
+                "https://example.com/a", self.directory, lambda: False
+            )
+
+    async def test_only_standard_web_ports_are_allowed(self):
+        with self.assertRaisesRegex(DownloadError, "URL"):
+            await SecureDownloader(FakeResolver([["8.8.8.8"]]), FakeClient([])).download(
+                "https://example.com:8443/a", self.directory, lambda: False
             )
 
 
@@ -209,3 +226,66 @@ class PinnedHTTPClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"GET /media?q=1 HTTP/1.1\r\n", writer.request)
         self.assertIn(b"Host: example.com\r\n", writer.request)
         self.assertTrue(writer.closed)
+
+    async def test_ipv6_host_header_is_bracketed(self):
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"HTTP/1.1 204 OK\r\nContent-Length: 0\r\n\r\n")
+        reader.feed_eof()
+        writer = FakeWriter()
+
+        async def factory(*args, **kwargs):
+            return reader, writer
+
+        response = await PinnedHTTPClient(factory).open(
+            "https://[2606:4700:4700::1111]/a", "2606:4700:4700::1111"
+        )
+        await response.close()
+        self.assertIn(b"Host: [2606:4700:4700::1111]\r\n", writer.request)
+
+    async def test_header_and_drain_timeouts_are_sanitized_and_close_socket(self):
+        class StalledReader:
+            async def readline(self):
+                await asyncio.Event().wait()
+
+        class StalledWriter(FakeWriter):
+            def __init__(self, stall_drain):
+                super().__init__()
+                self.stall_drain = stall_drain
+
+            async def drain(self):
+                if self.stall_drain:
+                    await asyncio.Event().wait()
+
+        for stall_drain in (False, True):
+            with self.subTest(stall_drain=stall_drain):
+                writer = StalledWriter(stall_drain)
+
+                async def factory(*args, **kwargs):
+                    return StalledReader(), writer
+
+                policy = TimeoutPolicy(headers_sec=0.001, drain_sec=0.001)
+                with self.assertRaisesRegex(DownloadError, "timed out"):
+                    await PinnedHTTPClient(factory, timeouts=policy).open(
+                        "https://example.com/a", "8.8.8.8"
+                    )
+                self.assertTrue(writer.closed)
+
+    async def test_close_timeout_is_bounded_and_sanitized(self):
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"HTTP/1.1 204 OK\r\nContent-Length: 0\r\n\r\n")
+        reader.feed_eof()
+
+        class Writer(FakeWriter):
+            async def wait_closed(self):
+                await asyncio.Event().wait()
+
+        writer = Writer()
+
+        async def factory(*args, **kwargs):
+            return reader, writer
+
+        response = await PinnedHTTPClient(
+            factory, timeouts=TimeoutPolicy(close_sec=0.001)
+        ).open("https://example.com/a", "8.8.8.8")
+        with self.assertRaisesRegex(DownloadError, "timed out"):
+            await response.close()

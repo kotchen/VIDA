@@ -39,6 +39,9 @@ class FileRecoveryTests(unittest.TestCase):
         outside = Path(self.temp.name) / "outside.mp4"
         with self.assertRaises(UnsafeMediaPath):
             service.commit_file(final, outside)
+        cross_episode = self.data / "episodes/e2/artifacts/media.mp4"
+        with self.assertRaises(UnsafeMediaPath):
+            service.commit_file(final, cross_episode)
 
     def test_reconcile_removes_parts_attempts_and_unreferenced_artifacts_but_preserves_references_and_sources(self):
         source = self._write("episodes/e1/source/upload.mp4", b"source")
@@ -65,6 +68,19 @@ class FileRecoveryTests(unittest.TestCase):
         service = MediaService(self.data, [ReferenceRepository(["../outside.txt", str(outside)])])
         service.reconcile_orphans()
         self.assertEqual(outside.read_bytes(), b"outside")
+
+    def test_reconciliation_deletes_unreferenced_symlink_even_when_target_is_referenced(self):
+        target = self._write("episodes/e1/artifacts/media.mp4", b"keep")
+        alias = self.data / "episodes/e1/artifacts/alias.mp4"
+        try:
+            alias.symlink_to(target)
+        except OSError as exc:
+            self.skipTest(f"symlink unavailable: {exc}")
+        MediaService(
+            self.data, [ReferenceRepository(["episodes/e1/artifacts/media.mp4"])]
+        ).reconcile_orphans()
+        self.assertTrue(target.exists())
+        self.assertFalse(alias.exists())
 
     def _write(self, relative, value):
         path = self.data / relative

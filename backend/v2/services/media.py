@@ -22,6 +22,15 @@ class MediaService:
     def commit_file(self, staged: Path, final: Path) -> None:
         source = self._bounded(staged)
         destination = self._bounded(final)
+        source_parts = source.relative_to(self._data_dir).parts
+        destination_parts = destination.relative_to(self._data_dir).parts
+        if (
+            len(source_parts) < 4 or len(destination_parts) < 4
+            or source_parts[0] != "episodes" or destination_parts[0] != "episodes"
+            or source_parts[1] != destination_parts[1]
+            or destination_parts[2] not in {"artifacts", "poster"}
+        ):
+            raise UnsafeMediaPath("media commit crosses episode or artifact boundary")
         if not source.is_file() or source.is_symlink():
             raise UnsafeMediaPath("staged media must be a regular file")
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -53,7 +62,7 @@ class MediaService:
                 for candidate in tuple(folder.rglob("*")):
                     if candidate.is_dir() and not candidate.is_symlink():
                         continue
-                    if candidate.resolve() not in references:
+                    if candidate.is_symlink() or candidate.resolve() not in references:
                         self._unlink_local(candidate)
                 for directory in sorted(
                     (path for path in folder.rglob("*") if path.is_dir()),

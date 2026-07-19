@@ -18,13 +18,13 @@ from backend.v2.jobs.source_ingest import (
 
 
 class FakeRunner:
-    def __init__(self, probe: dict, *, poster: bytes = b"jpeg", returncode: int = 0):
+    def __init__(self, probe: dict, *, poster: bytes = b"\xff\xd8\xff\xd9", returncode: int = 0):
         self.probe = probe
         self.poster = poster
         self.returncode = returncode
         self.commands: list[tuple[str, ...]] = []
 
-    async def run(self, command, cancel_check):
+    async def run(self, command, cancel_check, timeout_sec=None):
         self.commands.append(tuple(command))
         if command[0] == "ffprobe":
             return ProcessResult(self.returncode, json.dumps(self.probe), "secret stderr")
@@ -77,7 +77,7 @@ class SourceIngestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared.resolution, "1080p")
         self.assertEqual(prepared.media_content_type, "video/mp4")
         self.assertEqual(prepared.poster_content_type, "image/jpeg")
-        self.assertEqual(prepared.poster_path.read_bytes(), b"jpeg")
+        self.assertEqual(prepared.poster_path.read_bytes(), b"\xff\xd8\xff\xd9")
         self.assertEqual([command[0] for command in runner.commands], ["ffprobe", "ffmpeg"])
         self.assertTrue(all(isinstance(command, tuple) for command in runner.commands))
         self.assertEqual(progress, [5, 12, 20])
@@ -111,7 +111,7 @@ class SourceIngestTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_probe_json_is_sanitized_and_attempt_is_cleaned(self):
         class InvalidRunner:
-            async def run(self, command, cancel_check):
+            async def run(self, command, cancel_check, timeout_sec=None):
                 return ProcessResult(0, "not json", "do not leak")
 
         with self.assertRaisesRegex(SourceIngestError, "Media metadata is invalid") as raised:
@@ -134,7 +134,7 @@ class SourceIngestTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.terminated = False
 
-            async def run(self, command, cancel_check):
+            async def run(self, command, cancel_check, timeout_sec=None):
                 if cancel_check():
                     self.terminated = True
                     raise JobCanceled

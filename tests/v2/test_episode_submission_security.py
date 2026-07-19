@@ -91,8 +91,8 @@ class EpisodeSubmissionSecurityTests(unittest.IsolatedAsyncioTestCase):
         prefix = multipart_body(
             ("providerProfileId", self.profile.id, None, None),
             ("summaryLanguage", "zh", None, None),
-            ("file", b"one", "one.txt", "text/plain"),
-            ("file", b"two", "two.txt", "text/plain"),
+            ("file", b"one", "one.mp3", "audio/mpeg"),
+            ("file", b"two", "two.mp3", "audio/mpeg"),
         )
         body = prefix + b"z" * 10000
 
@@ -114,7 +114,7 @@ class EpisodeSubmissionSecurityTests(unittest.IsolatedAsyncioTestCase):
             ("providerProfileId", self.profile.id, None, None),
             ("summaryLanguage", "zh", None, None),
             ("title", "t" * 801, None, None),
-            ("file", b"one", "one.txt", "text/plain"),
+            ("file", b"one", "one.mp3", "audio/mpeg"),
         )
         body = prefix + b"z" * 10000
 
@@ -245,8 +245,8 @@ class EpisodeSubmissionSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.database_counts(), (0, 0))
 
     async def test_filename_utf8_component_boundary_and_overlong_cleanup(self):
-        safe = "界" * 78 + "aa.txt"
-        overlong = "界" * 79 + ".txt"
+        safe = "界" * 78 + "a.mp3"
+        overlong = "界" * 79 + ".mp3"
         exact, _ = await self.request(
             self.valid_multipart(b"ok", filename=safe),
             f"multipart/form-data; boundary={BOUNDARY}",
@@ -258,7 +258,7 @@ class EpisodeSubmissionSecurityTests(unittest.IsolatedAsyncioTestCase):
             chunk_size=13,
         )
         very_long, _ = await self.request(
-            self.valid_multipart(b"no", filename="a" * 300 + ".txt"),
+            self.valid_multipart(b"no", filename="a" * 300 + ".mp3"),
             f"multipart/form-data; boundary={BOUNDARY}",
             chunk_size=13,
         )
@@ -271,11 +271,11 @@ class EpisodeSubmissionSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(self.data_dir.rglob("*.part")), [])
         self.assertEqual(self.database_counts(), (1, 1))
 
-    def valid_multipart(self, file_bytes, filename="clip.txt"):
+    def valid_multipart(self, file_bytes, filename="clip.mp3"):
         return multipart_body(
             ("providerProfileId", self.profile.id, None, None),
             ("summaryLanguage", "zh", None, None),
-            ("file", file_bytes, filename, "text/plain"),
+            ("file", file_bytes, filename, "audio/mpeg"),
         )
 
     def valid_json(self):

@@ -47,7 +47,7 @@ class EpisodeSubmissionApiTests(unittest.TestCase):
                 "providerProfileId": self.profile["id"],
                 "summaryLanguage": "zh",
             },
-            files={"file": ("clip.txt", b"hello world", "text/plain")},
+            files={"file": ("clip.mp3", b"hello world", "audio/mpeg")},
         )
 
         self.assertEqual(response.status_code, 202, response.text)
@@ -56,7 +56,7 @@ class EpisodeSubmissionApiTests(unittest.TestCase):
         self.assertEqual(body["queuePosition"], 1)
         self.assertEqual(body["sourceType"], "upload")
         self.assertEqual(response.headers["Location"], f"/api/v2/episodes/{body['id']}")
-        source = self.data_dir / "episodes" / body["id"] / "source" / "clip.txt"
+        source = self.data_dir / "episodes" / body["id"] / "source" / "clip.mp3"
         self.assertEqual(source.read_bytes(), b"hello world")
         self.assertEqual(list(self.data_dir.rglob("*.part")), [])
         with self.runtime.database.connect() as conn:
@@ -68,7 +68,7 @@ class EpisodeSubmissionApiTests(unittest.TestCase):
                 "SELECT id,status,provider_profile_revision_id FROM jobs WHERE episode_id=?",
                 (body["id"],),
             ).fetchone()
-        self.assertEqual(episode["source_path"], f"episodes/{body['id']}/source/clip.txt")
+        self.assertEqual(episode["source_path"], f"episodes/{body['id']}/source/clip.mp3")
         self.assertEqual(episode["provider_profile_id"], self.profile["id"])
         self.assertEqual(job["status"], "queued")
         self.assertEqual(job["provider_profile_revision_id"], self.profile["activeRevisionId"])
@@ -86,7 +86,7 @@ class EpisodeSubmissionApiTests(unittest.TestCase):
                     "providerProfileId": self.profile["id"],
                     "summaryLanguage": "zh",
                 },
-                files={"file": ("clip.txt", b"hello", "text/plain")},
+                files={"file": ("clip.mp3", b"hello", "audio/mpeg")},
             )
 
         self.assertEqual(response.status_code, 202, response.text)
@@ -124,12 +124,12 @@ class EpisodeSubmissionApiTests(unittest.TestCase):
                 "providerProfileId": self.profile["id"],
                 "summaryLanguage": "zh",
             },
-            files={"file": ("large.txt", b"12345", "text/plain")},
+            files={"file": ("large.mp3", b"12345", "audio/mpeg")},
         )
 
         self.assert_error(response, 413, "file_too_large")
         self.assertEqual(list(self.data_dir.rglob("*.part")), [])
-        self.assertEqual(list(self.data_dir.rglob("large.txt")), [])
+        self.assertEqual(list(self.data_dir.rglob("large.mp3")), [])
         self.assert_database_counts(0, 0)
         self.runtime.scheduler.notify.assert_not_called()
 
@@ -137,7 +137,7 @@ class EpisodeSubmissionApiTests(unittest.TestCase):
         response = self.client.post(
             "/api/v2/episodes",
             data={"providerProfileId": self.profile["id"], "summaryLanguage": "zh"},
-            files={"file": ("empty.txt", b"", "text/plain")},
+            files={"file": ("empty.mp3", b"", "audio/mpeg")},
         )
 
         self.assert_error(response, 400, "empty_file")
@@ -146,7 +146,7 @@ class EpisodeSubmissionApiTests(unittest.TestCase):
         self.runtime.scheduler.notify.assert_not_called()
 
     def test_sanitizes_basename_and_rejects_unapproved_names(self):
-        for filename in ("../escape.txt", "folder\\escape.txt"):
+        for filename in ("../escape.mp3", "folder\\escape.mp3"):
             with self.subTest(filename=filename):
                 response = self.client.post(
                     "/api/v2/episodes",
@@ -154,7 +154,7 @@ class EpisodeSubmissionApiTests(unittest.TestCase):
                         "providerProfileId": self.profile["id"],
                         "summaryLanguage": "zh",
                     },
-                    files={"file": (filename, b"hello", "text/plain")},
+                    files={"file": (filename, b"hello", "audio/mpeg")},
                 )
                 self.assertEqual(response.status_code, 202, response.text)
                 source = (
@@ -162,7 +162,7 @@ class EpisodeSubmissionApiTests(unittest.TestCase):
                     / "episodes"
                     / response.json()["id"]
                     / "source"
-                    / "escape.txt"
+                    / "escape.mp3"
                 )
                 self.assertEqual(source.read_bytes(), b"hello")
         for filename in ("clip.exe", ".txt"):
@@ -181,8 +181,8 @@ class EpisodeSubmissionApiTests(unittest.TestCase):
 
     def test_sanitizes_windows_reserved_filename_characters(self):
         for filename, safe_name in (
-            ("bad:name.txt", "bad_name.txt"),
-            ("CON.txt", "_CON.txt"),
+            ("bad:name.mp3", "bad_name.mp3"),
+            ("CON.mp3", "_CON.mp3"),
         ):
             with self.subTest(filename=filename):
                 response = self.client.post(
@@ -191,7 +191,7 @@ class EpisodeSubmissionApiTests(unittest.TestCase):
                         "providerProfileId": self.profile["id"],
                         "summaryLanguage": "zh",
                     },
-                    files={"file": (filename, b"hello", "text/plain")},
+                    files={"file": (filename, b"hello", "audio/mpeg")},
                 )
                 self.assertEqual(response.status_code, 202, response.text)
                 source = (
@@ -205,8 +205,8 @@ class EpisodeSubmissionApiTests(unittest.TestCase):
 
     def test_stream_read_failure_removes_partial_file_and_creates_no_rows(self):
         class FailingUpload:
-            filename = "clip.txt"
-            content_type = "text/plain"
+            filename = "clip.mp3"
+            content_type = "audio/mpeg"
 
             def __init__(self):
                 self.calls = 0
@@ -236,7 +236,7 @@ class EpisodeSubmissionApiTests(unittest.TestCase):
 
         self.assertEqual(upload.requested_size, 1024 * 1024)
         self.assertEqual(list(self.data_dir.rglob("*.part")), [])
-        self.assertEqual(list(self.data_dir.rglob("clip.txt")), [])
+        self.assertEqual(list(self.data_dir.rglob("clip.mp3")), [])
         self.assert_database_counts(0, 0)
 
     def test_rejects_wrong_request_content_type_and_invalid_url(self):
@@ -257,6 +257,18 @@ class EpisodeSubmissionApiTests(unittest.TestCase):
         self.assert_database_counts(0, 0)
         self.runtime.scheduler.notify.assert_not_called()
 
+    def test_text_upload_is_rejected_as_unsupported_media(self):
+        response = self.client.post(
+            "/api/v2/episodes",
+            data={
+                "providerProfileId": self.profile["id"],
+                "summaryLanguage": "zh",
+            },
+            files={"file": ("notes.txt", b"not playable", "text/plain")},
+        )
+        self.assert_error(response, 415, "unsupported_media_type")
+        self.assert_database_counts(0, 0)
+
     def test_missing_or_deleted_profile_is_inactive_and_leaves_no_source(self):
         deleted = self.create_profile()
         self.assertEqual(
@@ -268,10 +280,10 @@ class EpisodeSubmissionApiTests(unittest.TestCase):
                 response = self.client.post(
                     "/api/v2/episodes",
                     data={"providerProfileId": profile_id, "summaryLanguage": "zh"},
-                    files={"file": ("clip.txt", b"hello", "text/plain")},
+                    files={"file": ("clip.mp3", b"hello", "audio/mpeg")},
                 )
                 self.assert_error(response, 422, "provider_profile_inactive")
-        self.assertEqual(list(self.data_dir.rglob("clip.txt")), [])
+        self.assertEqual(list(self.data_dir.rglob("clip.mp3")), [])
         self.assertEqual(list(self.data_dir.rglob("*.part")), [])
         self.assert_database_counts(0, 0)
         self.runtime.scheduler.notify.assert_not_called()
@@ -288,11 +300,11 @@ class EpisodeSubmissionApiTests(unittest.TestCase):
                     "providerProfileId": self.profile["id"],
                     "summaryLanguage": "zh",
                 },
-                files={"file": ("clip.txt", b"hello", "text/plain")},
+                files={"file": ("clip.mp3", b"hello", "audio/mpeg")},
             )
 
         self.assert_error(response, 500, "internal_error")
-        self.assertEqual(list(self.data_dir.rglob("clip.txt")), [])
+        self.assertEqual(list(self.data_dir.rglob("clip.mp3")), [])
         self.assertEqual(list(self.data_dir.rglob("*.part")), [])
         self.assert_database_counts(0, 0)
         self.runtime.scheduler.notify.assert_not_called()

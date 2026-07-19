@@ -26,10 +26,9 @@ UPLOAD_CHUNK_BYTES = 1024 * 1024
 MAX_UPLOAD_FILENAME_BYTES = 240
 MAX_MULTIPART_OVERHEAD_BYTES = 64 * 1024
 _ALLOWED_UPLOAD_EXTENSIONS = frozenset(
-    {".txt", ".mp3", ".mp4", ".m4a", ".wav", ".webm", ".mkv", ".ogg", ".flac"}
+    {".mp3", ".mp4", ".m4a", ".wav", ".webm", ".mkv", ".ogg", ".flac"}
 )
 _CANONICAL_CONTENT_TYPES = {
-    ".txt": "text/plain",
     ".mp3": "audio/mpeg",
     ".mp4": "video/mp4",
     ".m4a": "audio/mp4",
