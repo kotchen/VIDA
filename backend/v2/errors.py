@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+import traceback
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -11,6 +14,9 @@ from fastapi.exception_handlers import (
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
+
+logger = logging.getLogger(__name__)
 
 
 class V2Error(Exception):
@@ -39,7 +45,17 @@ def install_v2_error_contract(app: FastAPI) -> None:
         request.state.request_id = request_id
         try:
             response = await call_next(request)
-        except Exception:
+        except Exception as exc:
+            frames = traceback.extract_tb(exc.__traceback__)[-12:]
+            safe_traceback = " <- ".join(
+                f"{frame.name}@{Path(frame.filename).name}:{frame.lineno}"
+                for frame in frames
+            )
+            logger.error(
+                "Unhandled v2 request error type=%s traceback=%s",
+                type(exc).__name__,
+                safe_traceback,
+            )
             response = _error_response(
                 request,
                 "internal_error",

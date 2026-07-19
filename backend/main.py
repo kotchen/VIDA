@@ -13,12 +13,20 @@ import json
 import re
 import openai
 
-from video_processor import VideoProcessor
-from transcriber import Transcriber
-from summarizer import Summarizer
-from translator import Translator
-from model_settings import validate_temperature
-from v2.bootstrap import install_v2
+if __package__:
+    from .video_processor import VideoProcessor
+    from .transcriber import Transcriber
+    from .summarizer import Summarizer
+    from .translator import Translator
+    from .model_settings import validate_temperature
+    from .v2.bootstrap import install_v2
+else:
+    from video_processor import VideoProcessor
+    from transcriber import Transcriber
+    from summarizer import Summarizer
+    from translator import Translator
+    from model_settings import validate_temperature
+    from v2.bootstrap import install_v2
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)

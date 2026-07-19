@@ -8,7 +8,7 @@ from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path
 from collections.abc import AsyncIterable
 
-from fastapi import APIRouter, Request, Response, status
+from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
@@ -61,6 +61,28 @@ def create_episode_router(runtime: V2Runtime) -> APIRouter:
         "",
         response_model=EpisodeSubmissionResponse,
         status_code=status.HTTP_202_ACCEPTED,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": {"$ref": "#/components/schemas/EpisodeUrlSubmission"}
+                    },
+                    "multipart/form-data": {
+                        "schema": {
+                            "type": "object",
+                            "required": ["file", "providerProfileId", "summaryLanguage"],
+                            "properties": {
+                                "file": {"type": "string", "format": "binary"},
+                                "providerProfileId": {"type": "string"},
+                                "summaryLanguage": {"type": "string"},
+                                "title": {"type": "string"},
+                            },
+                        }
+                    },
+                },
+            }
+        },
     )
     async def submit_episode(request: Request):
         media_type = (
@@ -102,6 +124,16 @@ def create_episode_router(runtime: V2Runtime) -> APIRouter:
             content=response.model_dump(by_alias=True),
             headers={"Location": f"/api/v2/episodes/{submission.episode.id}"},
         )
+
+    @router.get("", response_model=list[ProjectResponse])
+    def list_episodes(
+        limit: int = Query(default=12, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ):
+        return [
+            _project_response(episode)
+            for episode in runtime.require_episodes().list_projects(limit, offset)
+        ]
 
     @router.get("/{episode_id}", response_model=EpisodeResponse)
     def get_episode(episode_id: str):
@@ -174,12 +206,20 @@ def create_episode_router(runtime: V2Runtime) -> APIRouter:
             },
         )
 
-    @router.api_route("/{episode_id}/media", methods=["GET", "HEAD"])
+    @router.get("/{episode_id}/media", operation_id="get_episode_media")
     async def get_media(episode_id: str, request: Request):
         return await _deliver_file(runtime, episode_id, request, "media")
 
-    @router.api_route("/{episode_id}/poster", methods=["GET", "HEAD"])
+    @router.head("/{episode_id}/media", operation_id="head_episode_media")
+    async def head_media(episode_id: str, request: Request):
+        return await _deliver_file(runtime, episode_id, request, "media")
+
+    @router.get("/{episode_id}/poster", operation_id="get_episode_poster")
     async def get_poster(episode_id: str, request: Request):
+        return await _deliver_file(runtime, episode_id, request, "poster")
+
+    @router.head("/{episode_id}/poster", operation_id="head_episode_poster")
+    async def head_poster(episode_id: str, request: Request):
         return await _deliver_file(runtime, episode_id, request, "poster")
 
     @router.post("/{episode_id}/cancel", response_model=JobResponse)

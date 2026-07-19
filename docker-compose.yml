@@ -12,15 +12,18 @@ services:
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-base}
       # 可选：本地上传单文件大小上限（MB），与本地环境变量一致
       - UPLOAD_MAX_MB=${UPLOAD_MAX_MB:-200}
-      # VIDA 2.0 startup configuration
+      # VIDA 2.0 startup configuration. VIDA_PROFILE_MASTER_KEY is required;
+      # generate it once, keep it secret, and back it up with ./data/v2.
       - V2_MAX_CONCURRENT_JOBS=${V2_MAX_CONCURRENT_JOBS:-2}
       - V2_UPLOAD_MAX_GB=${V2_UPLOAD_MAX_GB:-5}
       - VIDA_PROFILE_MASTER_KEY=${VIDA_PROFILE_MASTER_KEY:-}
       # 服务器配置
       - HOST=0.0.0.0
       - PORT=8000
-    # volumes:
-      # 挂载临时文件目录，便于查看和管理下载的文件  
+    volumes:
+      # Persistent VIDA 2.0 SQLite database, source media, and artifacts.
+      - ./data/v2:/app/data/v2
+      # 1.x history can optionally be persisted separately:
       # - ./temp:/app/temp
     restart: unless-stopped
     

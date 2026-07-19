@@ -54,7 +54,7 @@ cd AI-Video-Transcriber
 
 # 使用Docker Compose（最简单）
 cp .env.example .env
-# 编辑.env文件设置服务端默认值（可选）
+# 按下文生成 VIDA_PROFILE_MASTER_KEY 并写入 .env
 docker-compose up -d
 
 # 或者直接使用Docker
@@ -111,6 +111,24 @@ python3 start.py --prod
 ```
 
 这样可以在长时间任务（30-60+分钟）中保持SSE连接稳定。
+
+#### VIDA 2.0 生产配置
+
+VIDA 2.0 使用持久化 SQLite FIFO 队列，并加密保存 Provider Profile。首次部署时生成一次主密钥，将其安全存放在 `.env` 或密钥管理服务中，之后重启必须继续使用同一个值：
+
+```bash
+python3 -c "import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
+```
+
+```dotenv
+V2_MAX_CONCURRENT_JOBS=2
+V2_UPLOAD_MAX_GB=5
+VIDA_PROFILE_MASTER_KEY=<生成的 URL-safe Base64 值>
+```
+
+生产环境必须只运行**一个 FastAPI/Uvicorn 进程**，不要增加 Uvicorn worker。应用内部并发由 `V2_MAX_CONCURRENT_JOBS` 控制。`V2_UPLOAD_MAX_GB` 是 v2 流式上传上限，与 1.x 的 `UPLOAD_MAX_MB` 相互独立。
+
+请把完整的 `data/v2/` 目录和主密钥作为一个恢复单元安全备份。丢失 `VIDA_PROFILE_MASTER_KEY` 后，已保存的 Provider 凭据将无法恢复；VIDA 不会降级为明文存储。不要把主密钥写入数据目录、日志、命令历史或源码仓库。
 
 #### 使用显式环境变量启动（示例）
 
@@ -189,6 +207,9 @@ AI-Video-Transcriber/
 | `PORT` | 服务器端口 | `8000` | 否 |
 | `WHISPER_MODEL_SIZE` | Whisper模型大小 | `base` | 否 |
 | `UPLOAD_MAX_MB` | 本地上传单文件大小上限（MB） | `200` | 否 |
+| `V2_MAX_CONCURRENT_JOBS` | VIDA 2.0 持久队列 worker 数，必须为正整数 | `2` | 否 |
+| `V2_UPLOAD_MAX_GB` | VIDA 2.0 流式上传上限（GiB），必须为正整数 | `5` | 否 |
+| `VIDA_PROFILE_MASTER_KEY` | 恰好 32 个随机字节的 URL-safe Base64 编码 | - | **使用 VIDA 2.0 时必需** |
 
 另提供可选接口 `POST /api/process-upload`，与向 `/api/process-video` 提交 `file`  multipart 字段行为一致。
 

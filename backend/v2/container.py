@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
@@ -21,6 +22,9 @@ from .services.provider_profiles import (
     ProviderProfileService,
     ProviderRevisionCredentials,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 ProviderTestResult = tuple[bool, int, bool, str]
@@ -75,6 +79,7 @@ class V2Runtime:
 
     async def start(self) -> None:
         self.initialize()
+        self.log_startup_settings()
         if self.scheduler is None:
             raise RuntimeError("v2 runtime has no scheduler")
         async def reconcile() -> None:
@@ -82,6 +87,16 @@ class V2Runtime:
                 await asyncio.to_thread(self.media_service.reconcile_orphans)
 
         await self.scheduler.start(reconcile if self.media_service is not None else None)
+
+    def log_startup_settings(self) -> None:
+        if self.settings is None:
+            return
+        logger.info(
+            "VIDA v2 startup data_dir=%s workers=%d upload_limit_bytes=%d",
+            self.settings.data_dir,
+            self.settings.max_concurrent_jobs,
+            self.settings.upload_max_bytes,
+        )
 
     async def stop(self, grace_period_sec: float = 30.0) -> None:
         if self.scheduler is not None:
