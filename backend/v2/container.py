@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
@@ -14,6 +15,7 @@ from .repositories.episodes import EpisodeRepository
 from .repositories.jobs import JobRepository
 from .repositories.provider_profiles import ProviderProfileRepository
 from .services.episodes import EpisodeService
+from .services.media import MediaService
 from .services.provider_profiles import (
     ProviderProfileService,
     ProviderRevisionCredentials,
@@ -35,6 +37,7 @@ class V2Runtime:
     provider_profile_service: ProviderProfileService | None = None
     episode_repository: EpisodeRepository | None = None
     episode_service: EpisodeService | None = None
+    media_service: MediaService | None = None
     provider_tester: ProviderTester | None = None
     _initializer: Callable[[], "V2Runtime"] | None = field(default=None, repr=False)
 
@@ -53,6 +56,7 @@ class V2Runtime:
         self.provider_profile_service = initialized.provider_profile_service
         self.episode_repository = initialized.episode_repository
         self.episode_service = initialized.episode_service
+        self.media_service = initialized.media_service
         if self.provider_tester is None:
             self.provider_tester = initialized.provider_tester
 
@@ -70,7 +74,11 @@ class V2Runtime:
         self.initialize()
         if self.scheduler is None:
             raise RuntimeError("v2 runtime has no scheduler")
-        await self.scheduler.start()
+        async def reconcile() -> None:
+            if self.media_service is not None:
+                await asyncio.to_thread(self.media_service.reconcile_orphans)
+
+        await self.scheduler.start(reconcile if self.media_service is not None else None)
 
     async def stop(self, grace_period_sec: float = 30.0) -> None:
         if self.scheduler is not None:

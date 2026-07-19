@@ -32,6 +32,18 @@ class EpisodeRepository:
             row = _select_episode(conn, episode_id)
         return None if row is None else _episode_from_row(row)
 
+    def committed_paths(self) -> list[str]:
+        with self._database.connect() as conn:
+            rows = conn.execute(
+                "SELECT source_path,media_path,poster_path FROM episodes"
+            ).fetchall()
+        return [
+            value
+            for row in rows
+            for value in (row["source_path"], row["media_path"], row["poster_path"])
+            if value is not None
+        ]
+
     def list_projects(self, limit: int = 12, offset: int = 0) -> list[EpisodeRecord]:
         if not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")

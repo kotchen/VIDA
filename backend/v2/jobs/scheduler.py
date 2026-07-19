@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
 from ..domain import JobRecord
@@ -47,13 +48,20 @@ class Scheduler:
     def max_workers(self) -> int:
         return self._max_workers
 
-    async def start(self) -> None:
+    async def start(
+        self, before_workers: Callable[[], Awaitable[None]] | None = None
+    ) -> None:
         async with self._lifecycle_lock:
             if self._workers:
                 return
             await self._repository_call(
                 self._jobs.recover_interrupted, "Service restarted; job requeued"
             )
+            if before_workers is not None:
+                preparation = asyncio.create_task(before_workers())
+                cancellation_requested, _ = await _await_cancellation_safe(preparation)
+                if cancellation_requested:
+                    raise asyncio.CancelledError
             self._accepting_claims = True
             self._idle.clear()
             self._waiting_workers.clear()

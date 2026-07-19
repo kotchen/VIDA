@@ -20,6 +20,7 @@ from .repositories.episodes import EpisodeRepository
 from .repositories.jobs import JobRepository
 from .repositories.provider_profiles import ProviderProfileRepository
 from .services.episodes import EpisodeService
+from .services.media import MediaService
 from .services.provider_profiles import (
     ProviderProfileService,
     ProviderRevisionCredentials,
@@ -67,6 +68,7 @@ def _build_runtime(
     episode_service = EpisodeService(
         episode_repository, job_repository, database, settings.data_dir
     )
+    media_service = MediaService(settings.data_dir, [episode_repository])
     job_executor = executor or _UnavailableJobExecutor()
     scheduler = Scheduler(
         job_repository,
@@ -84,6 +86,7 @@ def _build_runtime(
         provider_profile_service=service,
         episode_repository=episode_repository,
         episode_service=episode_service,
+        media_service=media_service,
         provider_tester=test_provider_connection,
     )
 
