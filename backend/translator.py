@@ -5,8 +5,14 @@ from typing import Optional
 
 from openai import OpenAI
 
-from llm_sanitize import strip_llm_artifacts
-from model_settings import validate_temperature
+if __package__:
+    from .llm_sanitize import strip_llm_artifacts
+    from .logging_safety import log_exception
+    from .model_settings import validate_temperature
+else:
+    from llm_sanitize import strip_llm_artifacts
+    from logging_safety import log_exception
+    from model_settings import validate_temperature
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +65,7 @@ class Translator:
             self.client = OpenAI(api_key=eff_key, base_url=eff_base)
             logger.info("Translator OpenAI 客户端初始化成功")
         except Exception as e:
-            logger.error(f"初始化 OpenAI 客户端失败: {e}")
+            log_exception(logger, logging.ERROR, "初始化 OpenAI 客户端失败", e)
             self.client = None
     
     def _create_completion(self, **kwargs):
@@ -221,7 +227,7 @@ class Translator:
             source_lang_name = self.language_map.get(src_n, self.language_map.get(source_language, source_language))
             target_lang_name = self.language_map.get(tgt_n, self.language_map.get(target_language, target_language))
             
-            logger.info(f"开始翻译：{source_lang_name} -> {target_lang_name}")
+            logger.info("开始翻译")
             
             # 估算文本长度，决定是否需要分块
             if len(text) > 3000:
@@ -231,7 +237,7 @@ class Translator:
                 return await self._translate_single_text(text, target_lang_name, source_lang_name)
                 
         except Exception as e:
-            logger.error(f"翻译失败: {str(e)}")
+            log_exception(logger, logging.ERROR, "翻译失败", e)
             return text
     
     async def _translate_single_text(self, text: str, target_lang_name: str, source_lang_name: str) -> str:
@@ -264,7 +270,7 @@ class Translator:
 
             return strip_llm_artifacts(response.choices[0].message.content or "")
         except Exception as e:
-            logger.error(f"单文本翻译失败: {e}")
+            log_exception(logger, logging.ERROR, "单文本翻译失败", e)
             return text
     
     async def _translate_with_chunks(self, text: str, target_lang_name: str, source_lang_name: str) -> str:
@@ -308,7 +314,7 @@ class Translator:
                 translated_chunk = response.choices[0].message.content or ""
                 translated_chunks.append(strip_llm_artifacts(translated_chunk))
             except Exception as e:
-                logger.error(f"翻译第 {i+1} 块失败: {e}")
+                log_exception(logger, logging.ERROR, f"翻译第 {i+1} 块失败", e)
                 # 失败时保留原文
                 translated_chunks.append(chunk)
         

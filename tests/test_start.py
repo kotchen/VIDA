@@ -3,11 +3,28 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 import start
 
 
 class StartupOptionsTests(unittest.TestCase):
+    def test_uvicorn_access_log_is_disabled_to_avoid_query_secret_leaks(self):
+        options = start.StartupOptions(False, 8000, 2, 5, "master-key")
+        with (
+            patch.object(start, "parse_startup_options", return_value=options),
+            patch.object(start, "configure_ffmpeg_path"),
+            patch.object(start, "check_dependencies", return_value=True),
+            patch.object(start, "check_ffmpeg", return_value=True),
+            patch.object(start, "setup_environment", return_value=True),
+            patch.object(start.os, "chdir"),
+            patch.object(start.subprocess, "run") as run,
+        ):
+            start.main()
+
+        command = run.call_args.args[0]
+        self.assertIn("--no-access-log", command)
+
     def test_v2_cli_values_override_environment(self):
         key = base64.urlsafe_b64encode(b"k" * 32).decode("ascii")
         options = start.parse_startup_options(

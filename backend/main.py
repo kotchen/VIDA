@@ -18,6 +18,7 @@ if __package__:
     from .transcriber import Transcriber
     from .summarizer import Summarizer
     from .translator import Translator
+    from .logging_safety import disable_sensitive_dependency_logs, log_exception
     from .model_settings import validate_temperature
     from .v2.bootstrap import install_v2
 else:
@@ -25,11 +26,13 @@ else:
     from transcriber import Transcriber
     from summarizer import Summarizer
     from translator import Translator
+    from logging_safety import disable_sensitive_dependency_logs, log_exception
     from model_settings import validate_temperature
     from v2.bootstrap import install_v2
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
+disable_sensitive_dependency_logs()
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="AI视频转录器", version="1.0.0")
@@ -84,7 +87,7 @@ def save_tasks(tasks_data):
             with open(TASKS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(tasks_data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        logger.error(f"保存任务状态失败: {e}")
+        log_exception(logger, logging.ERROR, "保存任务状态失败", e)
 
 async def broadcast_task_update(task_id: str, task_data: dict):
     """向所有连接的SSE客户端广播任务状态更新"""
@@ -96,7 +99,7 @@ async def broadcast_task_update(task_id: str, task_data: dict):
                 await queue.put(json.dumps(task_data, ensure_ascii=False))
                 logger.debug(f"消息已发送到队列: {task_id}")
             except Exception as e:
-                logger.warning(f"发送消息到队列失败: {e}")
+                log_exception(logger, logging.WARNING, "发送消息到队列失败", e)
                 connections_to_remove.append(queue)
         
         # 移除断开的连接
@@ -218,7 +221,7 @@ async def _run_post_extract_pipeline(
         save_tasks(tasks)
         await broadcast_task_update(task_id, tasks[task_id])
     except Exception as e:
-        logger.error(f"保存原始转录Markdown失败: {e}")
+        log_exception(logger, logging.ERROR, "保存原始转录Markdown失败", e)
 
     tasks[task_id].update({
         "progress": 55,
@@ -237,7 +240,7 @@ async def _run_post_extract_pipeline(
         detected_language = request_translator.infer_language_code(raw_script)
     detected_language = request_translator.normalize_lang_code(detected_language) or detected_language
 
-    logger.info(f"检测到的语言: {detected_language}, 摘要语言: {summary_language}")
+    logger.info("已检测源语言并选择摘要语言")
 
     translation_content = None
     translation_filename = None
@@ -248,7 +251,7 @@ async def _run_post_extract_pipeline(
     )
 
     if need_translation:
-        logger.info(f"需要翻译: {detected_language} -> {summary_language}")
+        logger.info("源语言与摘要语言不同，开始翻译")
         tasks[task_id].update({
             "progress": 70,
             "message": "正在生成翻译...",
@@ -266,8 +269,7 @@ async def _run_post_extract_pipeline(
             await f.write(translation_with_title)
     else:
         logger.info(
-            f"不需要翻译: detected_language={detected_language}, summary_language={summary_language}, "
-            f"need_translation={need_translation}"
+            "不需要翻译: need_translation=%s", need_translation
         )
 
     tasks[task_id].update({
@@ -519,7 +521,7 @@ async def process_video(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"处理视频时出错: {str(e)}")
+        log_exception(logger, logging.ERROR, "处理视频时出错", e)
         raise HTTPException(status_code=500, detail=f"处理失败: {str(e)}")
 
 async def process_video_task(
@@ -552,9 +554,10 @@ async def process_video_task(
             temperature,
         )
         logger.info(
-            "Created request-scoped AI services: base_url=%s, model=%s, temperature=%s",
-            model_base_url.rstrip("/") or "environment default",
-            model_id or "default",
+            "Created request-scoped AI services: custom_endpoint=%s, "
+            "model_configured=%s, temperature=%s",
+            bool(model_base_url.rstrip("/")),
+            bool(model_id),
             temperature,
         )
 
@@ -618,7 +621,7 @@ async def process_video_task(
         # 文件会在一定时间后自动清理或用户手动清理
 
     except Exception as e:
-        logger.error(f"任务 {task_id} 处理失败: {str(e)}")
+        log_exception(logger, logging.ERROR, f"任务 {task_id} 处理失败", e)
         # 从处理列表中移除URL
         processing_urls.discard(url)
         
@@ -675,9 +678,10 @@ async def process_upload_task(
             temperature,
         )
         logger.info(
-            "Created upload AI services: base_url=%s, model=%s, temperature=%s",
-            model_base_url.rstrip("/") or "environment default",
-            model_id or "default",
+            "Created upload AI services: custom_endpoint=%s, "
+            "model_configured=%s, temperature=%s",
+            bool(model_base_url.rstrip("/")),
+            bool(model_id),
             temperature,
         )
 
@@ -733,7 +737,7 @@ async def process_upload_task(
         )
 
     except Exception as e:
-        logger.error(f"任务 {task_id} 处理失败: {str(e)}")
+        log_exception(logger, logging.ERROR, f"任务 {task_id} 处理失败", e)
         if task_id in active_tasks:
             del active_tasks[task_id]
         tasks[task_id].update({
@@ -796,7 +800,7 @@ async def task_stream(task_id: str):
         except asyncio.CancelledError:
             logger.info(f"SSE连接被取消: {task_id}")
         except Exception as e:
-            logger.error(f"SSE流异常: {e}")
+            log_exception(logger, logging.ERROR, "SSE流异常", e)
         finally:
             # 清理连接
             if task_id in sse_connections and queue in sse_connections[task_id]:
@@ -842,7 +846,7 @@ async def download_file(filename: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"下载文件失败: {e}")
+        log_exception(logger, logging.ERROR, "下载文件失败", e)
         raise HTTPException(status_code=500, detail=f"下载失败: {str(e)}")
 
 
@@ -870,7 +874,7 @@ async def download_file_in_folder(folder: str, filename: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"下载文件失败: {e}")
+        log_exception(logger, logging.ERROR, "下载文件失败", e)
         raise HTTPException(status_code=500, detail=f"下载失败: {str(e)}")
 
 
@@ -948,7 +952,7 @@ async def list_generated_files():
                 "files": [_file_entry(p, include_model=False) for p in root_files],
             })
     except Exception as e:
-        logger.error(f"列出文件失败: {e}")
+        log_exception(logger, logging.ERROR, "列出文件失败", e)
         raise HTTPException(status_code=500, detail=f"列出文件失败: {str(e)}")
 
     return {"groups": groups}
@@ -983,7 +987,7 @@ async def delete_generated_file(folder: str, filename: str):
             parent.rmdir()
         return {"message": "文件已删除"}
     except Exception as e:
-        logger.error(f"删除文件失败: {e}")
+        log_exception(logger, logging.ERROR, "删除文件失败", e)
         raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
 
 
@@ -1000,7 +1004,7 @@ async def delete_generated_folder(folder: str):
         shutil.rmtree(dir_path)
         return {"message": "目录已删除"}
     except Exception as e:
-        logger.error(f"删除目录失败: {e}")
+        log_exception(logger, logging.ERROR, "删除目录失败", e)
         raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
 
 

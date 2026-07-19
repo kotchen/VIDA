@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import importlib
+import json
 import io
+import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -119,6 +122,28 @@ class LegacyApiContractTests(unittest.TestCase):
         self.assertEqual(
             set(submit_body["content"]), {"application/json", "multipart/form-data"}
         )
+        self._assert_all_local_refs_resolve(schema)
+
+    def _assert_all_local_refs_resolve(self, document):
+        def resolve(reference):
+            self.assertTrue(reference.startswith("#/"), reference)
+            current = document
+            for raw_part in reference[2:].split("/"):
+                part = raw_part.replace("~1", "/").replace("~0", "~")
+                self.assertIn(part, current, reference)
+                current = current[part]
+
+        def walk(value):
+            if isinstance(value, dict):
+                if "$ref" in value:
+                    resolve(value["$ref"])
+                for child in value.values():
+                    walk(child)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child)
+
+        walk(document)
 
     def test_contract_document_lists_every_approved_route(self):
         contract = Path("docs/api/v2-api-contract.md").read_text(encoding="utf-8")
@@ -132,6 +157,68 @@ class LegacyApiContractTests(unittest.TestCase):
         ):
             with self.subTest(route=route):
                 self.assertIn(route, contract)
+
+class RealBackendImportTests(unittest.TestCase):
+    def test_real_backend_main_imports_from_repo_root_and_v1_routes_respond(self):
+        script = r'''
+import json, tempfile
+import logging
+from pathlib import Path
+from fastapi.testclient import TestClient
+import backend.main as main
+with tempfile.TemporaryDirectory() as directory:
+    main.TEMP_DIR = Path(directory)
+    main.TASKS_FILE = main.TEMP_DIR / "tasks.json"
+    main.tasks = {}
+    main.active_tasks = {}
+    main.processing_urls = set()
+    client = TestClient(main.app)
+    result = {
+        "module": main.__name__,
+        "files": [client.get("/api/files").status_code, sorted(client.get("/api/files").json())],
+        "active": [client.get("/api/tasks/active").status_code, sorted(client.get("/api/tasks/active").json())],
+        "missing": client.get("/api/task-status/missing").status_code,
+        "invalid": client.get("/api/download/not-markdown.txt").status_code,
+        "sensitiveLoggersDisabled": {
+            name: logging.getLogger(name).disabled
+            for name in ("httpx", "httpcore", "openai", "urllib3")
+        },
+    }
+    print(json.dumps(result))
+'''
+        result = self._run_import(script, Path.cwd())
+        payload = json.loads(result.stdout.splitlines()[-1])
+        self.assertEqual(payload["module"], "backend.main")
+        self.assertEqual(payload["files"], [200, ["groups"]])
+        self.assertEqual(
+            payload["active"], [200, ["active_tasks", "processing_urls", "task_ids"]]
+        )
+        self.assertEqual((payload["missing"], payload["invalid"]), (404, 400))
+        self.assertTrue(all(payload["sensitiveLoggersDisabled"].values()))
+
+    def test_real_main_imports_from_backend_working_directory(self):
+        result = self._run_import(
+            "import main; print(main.__name__, len(main.app.routes))",
+            Path.cwd() / "backend",
+        )
+        self.assertRegex(result.stdout, r"main \d+")
+
+    @staticmethod
+    def _run_import(script, cwd):
+        environment = os.environ.copy()
+        environment.update(
+            OPENAI_API_KEY="offline-import-key",
+            OPENAI_BASE_URL="https://provider.example/v1",
+        )
+        return subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=cwd,
+            env=environment,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=True,
+        )
 
 
 if __name__ == "__main__":

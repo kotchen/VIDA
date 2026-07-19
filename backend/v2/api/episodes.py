@@ -66,7 +66,27 @@ def create_episode_router(runtime: V2Runtime) -> APIRouter:
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": {"$ref": "#/components/schemas/EpisodeUrlSubmission"}
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "sourceUrl", "providerProfileId", "summaryLanguage"
+                            ],
+                            "properties": {
+                                "sourceUrl": {
+                                    "type": "string", "format": "uri", "maxLength": 2048
+                                },
+                                "providerProfileId": {
+                                    "type": "string", "minLength": 1, "maxLength": 128
+                                },
+                                "summaryLanguage": {
+                                    "type": "string", "minLength": 1, "maxLength": 32
+                                },
+                                "title": {
+                                    "type": "string", "minLength": 1, "maxLength": 200
+                                },
+                            },
+                        }
                     },
                     "multipart/form-data": {
                         "schema": {

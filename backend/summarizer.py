@@ -5,9 +5,11 @@ from typing import Optional
 
 if __package__:
     from .llm_sanitize import strip_llm_artifacts
+    from .logging_safety import log_exception
     from .model_settings import validate_temperature
 else:
     from llm_sanitize import strip_llm_artifacts
+    from logging_safety import log_exception
     from model_settings import validate_temperature
 
 logger = logging.getLogger(__name__)
@@ -106,7 +108,7 @@ class Summarizer:
         except Exception as e:
             if self.raise_on_error:
                 raise
-            logger.error(f"优化转录文本失败: {str(e)}")
+            log_exception(logger, logging.ERROR, "优化转录文本失败", e)
             logger.info("返回原始转录文本")
             return raw_transcript
 
@@ -257,7 +259,7 @@ class Summarizer:
                 optimized_chunks.append(optimized_chunk)
                 
             except Exception as e:
-                logger.error(f"优化第 {i+1} 块失败: {e}")
+                log_exception(logger, logging.ERROR, f"优化第 {i+1} 块失败", e)
                 # 失败时使用基本清理
                 cleaned_chunk = self._basic_transcript_cleanup(chunk)
                 optimized_chunks.append(cleaned_chunk)
@@ -345,7 +347,7 @@ class Summarizer:
             enforced = self._enforce_paragraph_max_chars(optimized_text.strip(), max_chars=400)
             return self._ensure_markdown_paragraphs(enforced)
         except Exception as e:
-            logger.error(f"单块文本优化失败: {e}")
+            log_exception(logger, logging.ERROR, "单块文本优化失败", e)
             return self._apply_basic_formatting(chunk_text)
 
     def _smart_split_long_chunk(self, text: str, max_chars_per_chunk: int) -> list:
@@ -504,7 +506,10 @@ class Summarizer:
                 oc = re.sub(r"^\[(上文续|Context continued)：?:?.*?\]\s*", "", oc, flags=re.S)
                 optimized.append(oc)
             except Exception as e:
-                logger.warning(f"第 {i+1} 块优化失败，使用基础格式化: {e}")
+                log_exception(
+                    logger, logging.WARNING,
+                    f"第 {i+1} 块优化失败，使用基础格式化", e,
+                )
                 optimized.append(self._apply_basic_formatting(c))
 
         # 邻接块去重
@@ -830,7 +835,7 @@ class Summarizer:
             return validated_text
             
         except Exception as e:
-            logger.error(f"最终段落整理失败: {e}")
+            log_exception(logger, logging.ERROR, "最终段落整理失败", e)
             # 失败时使用基础分段处理
             return self._basic_paragraph_fallback(text)
 
@@ -871,7 +876,7 @@ class Summarizer:
             return '\n\n'.join(organized_chunks)
             
         except Exception as e:
-            logger.error(f"长文本段落整理失败: {e}")
+            log_exception(logger, logging.ERROR, "长文本段落整理失败", e)
             return self._basic_paragraph_fallback(text)
 
     async def _organize_single_chunk(self, text: str, lang_instruction: str) -> str:
@@ -1017,7 +1022,7 @@ Core requirements:
                 return await self._summarize_with_chunks(transcript, target_language, video_title, max_summarize_tokens)
             
         except Exception as e:
-            logger.error(f"生成摘要失败: {str(e)}")
+            log_exception(logger, logging.ERROR, "生成摘要失败", e)
             return self._generate_fallback_summary(transcript, target_language, video_title)
 
     async def _summarize_single_text(self, transcript: str, target_language: str, video_title: str = None) -> str:
@@ -1103,7 +1108,7 @@ Output content only, no headings like "Summary:"."""
                 chunk_summaries.append(chunk_summary)
                 
             except Exception as e:
-                logger.error(f"摘要第 {i+1} 块失败: {e}")
+                log_exception(logger, logging.ERROR, f"摘要第 {i+1} 块失败", e)
                 # 失败时生成简单摘要
                 simple_summary = f"第{i+1}部分内容概述：" + chunk[:200] + "..."
                 chunk_summaries.append(simple_summary)
@@ -1192,7 +1197,7 @@ Rules:
 
             return strip_llm_artifacts(response.choices[0].message.content or "")
         except Exception as e:
-            logger.error(f"整合摘要失败: {e}")
+            log_exception(logger, logging.ERROR, "整合摘要失败", e)
             # 失败时直接合并
             return combined_summaries
 

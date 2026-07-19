@@ -290,6 +290,6 @@ GET /api/v2/episodes/{id}/export?format=txt|srt|md
 
 v2 数据目录固定为项目根目录下 `data/v2/`，SQLite 文件为 `data/v2/vida-v2.sqlite3`，Episode 文件位于 `data/v2/episodes/{episodeId}/`。启动顺序为：校验配置、运行幂等 migration、恢复遗留 processing Job、清理未被数据库引用的 staging/orphan 文件、启动 worker。
 
-第一版生产部署只支持一个 FastAPI/Uvicorn 进程；不要使用多个 Uvicorn worker。应用内部 worker 已提供配置的并发。启动日志只记录数据目录、worker 数和上传上限，不记录主密钥、Provider 凭据、密文、URL query 或数据库内容。
+第一版生产部署只支持一个 FastAPI/Uvicorn 进程；不要使用多个 Uvicorn worker。应用内部 worker 已提供配置的并发。启动日志只记录数据目录、worker 数和上传上限，不记录主密钥、Provider 凭据、密文、URL query 或数据库内容。生产启动命令关闭 Uvicorn access log，应用也禁用可能输出完整请求 URL、query、header 或 Provider payload 的 HTTP/Provider 依赖日志；处理失败时只记录安全阶段名和异常类型，不记录原始异常消息。
 
 必须把整个 `data/v2/` 和 `VIDA_PROFILE_MASTER_KEY` 作为一个恢复单元安全备份。丢失主密钥后，已存 Provider 凭据不可恢复，服务不会降级到明文存储。

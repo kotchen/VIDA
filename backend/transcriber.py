@@ -42,7 +42,7 @@ class Transcriber:
         async with self._model_lock:
             if self.model is not None:
                 return
-            logger.info("正在加载Whisper模型: %s", self.model_size)
+            logger.info("正在加载Whisper模型")
             try:
                 self.model = await asyncio.to_thread(
                     WhisperModel,

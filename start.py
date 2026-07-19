@@ -192,7 +192,8 @@ def main():
         cmd = [
             sys.executable, "-m", "uvicorn", "main:app",
             "--host", host,
-            "--port", str(port)
+            "--port", str(port),
+            "--no-access-log",
         ]
         
         # 只在开发模式下启用热重载
