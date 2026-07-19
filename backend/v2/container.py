@@ -10,8 +10,10 @@ from .database import Database
 from .errors import install_v2_error_contract
 from .jobs.models import JobExecutor
 from .jobs.scheduler import Scheduler
+from .repositories.episodes import EpisodeRepository
 from .repositories.jobs import JobRepository
 from .repositories.provider_profiles import ProviderProfileRepository
+from .services.episodes import EpisodeService
 from .services.provider_profiles import (
     ProviderProfileService,
     ProviderRevisionCredentials,
@@ -31,6 +33,8 @@ class V2Runtime:
     scheduler: Scheduler | None = None
     provider_profile_repository: ProviderProfileRepository | None = None
     provider_profile_service: ProviderProfileService | None = None
+    episode_repository: EpisodeRepository | None = None
+    episode_service: EpisodeService | None = None
     provider_tester: ProviderTester | None = None
     _initializer: Callable[[], "V2Runtime"] | None = field(default=None, repr=False)
 
@@ -47,6 +51,8 @@ class V2Runtime:
         self.scheduler = initialized.scheduler
         self.provider_profile_repository = initialized.provider_profile_repository
         self.provider_profile_service = initialized.provider_profile_service
+        self.episode_repository = initialized.episode_repository
+        self.episode_service = initialized.episode_service
         if self.provider_tester is None:
             self.provider_tester = initialized.provider_tester
 
@@ -54,6 +60,11 @@ class V2Runtime:
         if self.provider_profile_service is None:
             raise RuntimeError("v2 runtime has not started")
         return self.provider_profile_service
+
+    def require_episodes(self) -> EpisodeService:
+        if self.episode_service is None:
+            raise RuntimeError("v2 runtime has not started")
+        return self.episode_service
 
     async def start(self) -> None:
         self.initialize()

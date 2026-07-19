@@ -16,8 +16,10 @@ from .errors import V2Error
 from .domain import JobRecord
 from .jobs.models import JobExecutor
 from .jobs.scheduler import Scheduler
+from .repositories.episodes import EpisodeRepository
 from .repositories.jobs import JobRepository
 from .repositories.provider_profiles import ProviderProfileRepository
+from .services.episodes import EpisodeService
 from .services.provider_profiles import (
     ProviderProfileService,
     ProviderRevisionCredentials,
@@ -61,6 +63,10 @@ def _build_runtime(
     repository = ProviderProfileRepository(database)
     service = ProviderProfileService(repository, CredentialCipher(settings.master_key))
     job_repository = JobRepository(database)
+    episode_repository = EpisodeRepository(database)
+    episode_service = EpisodeService(
+        episode_repository, job_repository, database, settings.data_dir
+    )
     job_executor = executor or _UnavailableJobExecutor()
     scheduler = Scheduler(
         job_repository,
@@ -76,6 +82,8 @@ def _build_runtime(
         scheduler=scheduler,
         provider_profile_repository=repository,
         provider_profile_service=service,
+        episode_repository=episode_repository,
+        episode_service=episode_service,
         provider_tester=test_provider_connection,
     )
 

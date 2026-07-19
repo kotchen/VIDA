@@ -97,3 +97,34 @@ class ProviderConnectionTestResponse(ApiModel):
     latency_ms: int = Field(ge=0)
     model_available: bool
     message: str
+
+
+class EpisodeUrlSubmission(ApiModel):
+    source_url: HttpUrl
+    provider_profile_id: NonEmptyString
+    summary_language: NonEmptyString
+    title: NonEmptyString | None = None
+
+
+class EpisodeUploadSubmission(ApiModel):
+    provider_profile_id: NonEmptyString
+    summary_language: NonEmptyString
+    title: NonEmptyString | None = None
+
+
+class EpisodeSubmissionResponse(ApiModel):
+    id: str
+    title: str
+    source_type: str
+    media_url: str | None = None
+    poster_url: str | None = None
+    duration_sec: float = 0
+    resolution: str | None = None
+    status: str
+    language: str
+    created_at: str
+    progress: int
+    message: str
+    queue_position: int | None
+    provider_profile_id: str
+    warnings: list[dict[str, str]]
