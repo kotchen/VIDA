@@ -289,3 +289,23 @@ class PinnedHTTPClientTests(unittest.IsolatedAsyncioTestCase):
         ).open("https://example.com/a", "8.8.8.8")
         with self.assertRaisesRegex(DownloadError, "timed out"):
             await response.close()
+
+    async def test_cancel_during_headers_closes_connected_writer(self):
+        class Reader:
+            async def readline(self):
+                await asyncio.Event().wait()
+
+        writer = FakeWriter()
+
+        async def factory(*args, **kwargs):
+            return Reader(), writer
+
+        task = asyncio.create_task(
+            PinnedHTTPClient(factory).open("https://example.com/a", "8.8.8.8")
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(writer.closed)

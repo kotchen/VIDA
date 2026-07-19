@@ -104,6 +104,20 @@ class FileRecoveryTests(unittest.TestCase):
         self.assertTrue(sentinel.exists())
         self.assertTrue(all(not link.exists() for link in links))
 
+    def test_reconciliation_unlinks_episodes_root_symlink_without_traversing(self):
+        episodes = self.data / "episodes"
+        outside = Path(self.temp.name) / "outside-episodes"
+        victim = outside / "e1/attempts/j1/victim.part"
+        victim.parent.mkdir(parents=True)
+        victim.write_bytes(b"keep")
+        try:
+            episodes.symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"symlink unavailable: {exc}")
+        MediaService(self.data, []).reconcile_orphans()
+        self.assertFalse(episodes.exists())
+        self.assertEqual(victim.read_bytes(), b"keep")
+
     def _write(self, relative, value):
         path = self.data / relative
         path.parent.mkdir(parents=True, exist_ok=True)

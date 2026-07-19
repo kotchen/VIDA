@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import base64
 import tempfile
 import unittest
 from dataclasses import replace
@@ -19,6 +20,7 @@ from backend.v2.jobs.source_ingest import (
     YtDlpDownloader,
     SSRFProxy,
 )
+import backend.v2.jobs.source_ingest as source_ingest
 from tests.v2.test_source_ingest import FakeDownloader, FakeRunner, _episode
 from tests.v2.test_secure_download import FakeClient, FakeResolver, FakeResponse
 
@@ -70,6 +72,25 @@ class SourceBoundarySecurityTests(unittest.IsolatedAsyncioTestCase):
                     _episode(source_path=source.relative_to(self.data).as_posix()),
                     attempt, lambda: False,
                 )
+
+    async def test_attempt_symlink_cannot_delete_cross_episode_victim(self):
+        source = self.source_dir / "clip.mp3"
+        source.write_bytes(b"audio")
+        victim = self.data / "episodes/e2/attempts/victim"
+        victim.mkdir(parents=True)
+        sentinel = victim / "keep.bin"
+        sentinel.write_bytes(b"keep")
+        self.attempt.parent.mkdir(parents=True)
+        try:
+            self.attempt.symlink_to(victim, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"symlink unavailable: {exc}")
+        with self.assertRaisesRegex(SourceIngestError, "attempt"):
+            await SourceIngestor(
+                FakeRunner({}), FakeDownloader(), data_dir=self.data,
+                audio_poster=self.poster,
+            ).prepare(_episode(source_path=source.relative_to(self.data).as_posix()), self.attempt, lambda: False)
+        self.assertEqual(sentinel.read_bytes(), b"keep")
 
     async def test_probe_and_poster_force_local_protocol_and_expected_demuxer(self):
         source = self.source_dir / "clip.mp4"
@@ -258,6 +279,149 @@ class ControlledProxyTests(unittest.IsolatedAsyncioTestCase):
                 connector=connector,
             ).connect_target("example.com", 443, lambda: False)
         self.assertEqual(connector.calls, [("8.8.8.8", 443)])
+
+    async def test_writer_closes_when_recheck_times_out_or_is_canceled(self):
+        class Writer:
+            def __init__(self):
+                self.closed = False
+
+            def get_extra_info(self, name):
+                return ("8.8.8.8", 443)
+
+            def close(self):
+                self.closed = True
+
+            async def wait_closed(self):
+                pass
+
+        class Resolver:
+            def __init__(self):
+                self.calls = 0
+                self.rechecking = asyncio.Event()
+
+            async def resolve(self, host, port):
+                self.calls += 1
+                if self.calls == 1:
+                    return ("8.8.8.8",)
+                self.rechecking.set()
+                await asyncio.Event().wait()
+
+        for canceled in (False, True):
+            with self.subTest(canceled=canceled):
+                writer = Writer()
+
+                async def connector(host, port):
+                    return object(), writer
+
+                flag = False
+                proxy = SSRFProxy(
+                    resolver=Resolver(), connector=connector,
+                    timeouts=TimeoutPolicy(recheck_sec=0.001),
+                )
+                task = asyncio.create_task(
+                    proxy.connect_target("example.com", 443, lambda: flag)
+                )
+                await proxy._resolver.rechecking.wait()
+                if canceled:
+                    flag = True
+                    with self.assertRaises(JobCanceled):
+                        await task
+                else:
+                    with self.assertRaises(asyncio.TimeoutError):
+                        await task
+                self.assertTrue(writer.closed)
+
+    def test_connect_authority_and_headers_are_strict(self):
+        valid_token = "token"
+        auth = base64.b64encode(b"token:").decode()
+        for authority, expected in (
+            ("example.com:443", ("example.com", 443)),
+            ("[2606:4700:4700::1111]:443", ("2606:4700:4700::1111", 443)),
+        ):
+            request = (
+                f"CONNECT {authority} HTTP/1.1\r\n"
+                f"Proxy-Authorization: Basic {auth}\r\nHost: {authority}\r\n\r\n"
+            ).encode()
+            self.assertEqual(source_ingest._parse_connect_request(request, valid_token), expected)
+        malformed = (
+            "example.com", "example.com:8443", "example.com:443/path",
+            "example.com:443?x", "user@example.com:443", "2001:db8::1:443",
+            "[2606:4700::1]", "[2606:4700::1]:443/x", "example.com:x",
+            "example.com:443\x00",
+        )
+        for authority in malformed:
+            with self.subTest(authority=authority), self.assertRaises(DownloadError):
+                source_ingest._parse_connect_request(
+                    f"CONNECT {authority} HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\n".encode(),
+                    valid_token,
+                )
+        malformed_requests = (
+            f"GET example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\n",
+            f"CONNECT example.com:443 HTTP/2\r\nProxy-Authorization: Basic {auth}\r\n\r\n",
+            f"CONNECT  example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\n",
+            f"CONNECT example.com:443 HTTP/1.1\r\nBad Header: x\r\nProxy-Authorization: Basic {auth}\r\n\r\n",
+            f"CONNECT example.com:443 HTTP/1.1\r\nBroken\r\nProxy-Authorization: Basic {auth}\r\n\r\n",
+            f"CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\nProxy-Authorization: Basic {auth}\r\n\r\n",
+        )
+        for request in malformed_requests:
+            with self.subTest(request=request), self.assertRaises(DownloadError):
+                source_ingest._parse_connect_request(request.encode(), valid_token)
+
+    async def test_real_loopback_rejects_auth_and_shutdown_joins_active_handler(self):
+        class UpstreamWriter:
+            def __init__(self):
+                self.closed = False
+
+            def get_extra_info(self, name):
+                return ("8.8.8.8", 443)
+
+            def write(self, data):
+                pass
+
+            async def drain(self):
+                pass
+
+            def close(self):
+                self.closed = True
+
+            async def wait_closed(self):
+                pass
+
+        upstream_reader = asyncio.StreamReader()
+        upstream = UpstreamWriter()
+
+        async def connector(host, port):
+            return upstream_reader, upstream
+
+        proxy = SSRFProxy(
+            resolver=FakeResolver([["8.8.8.8"]]), connector=connector
+        )
+        await proxy.__aenter__()
+        parsed = __import__("urllib.parse", fromlist=["urlsplit"]).urlsplit(proxy.proxy_url)
+        reader, writer = await asyncio.open_connection("127.0.0.1", parsed.port)
+        writer.write(b"CONNECT example.com:443 HTTP/1.1\r\n\r\n")
+        await writer.drain()
+        self.assertIn(
+            b"403", await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 1)
+        )
+        writer.close()
+        await asyncio.wait_for(writer.wait_closed(), 1)
+
+        token = parsed.username
+        auth = base64.b64encode(f"{token}:".encode()).decode()
+        reader, writer = await asyncio.open_connection("127.0.0.1", parsed.port)
+        writer.write(
+            f"CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        self.assertIn(
+            b"200", await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 1)
+        )
+        await asyncio.wait_for(proxy.__aexit__(None, None, None), 1)
+        self.assertEqual(proxy._handlers, set())
+        self.assertTrue(upstream.closed)
+        writer.close()
+        await asyncio.wait_for(writer.wait_closed(), 1)
 
 
 class TimeoutSecurityTests(unittest.IsolatedAsyncioTestCase):

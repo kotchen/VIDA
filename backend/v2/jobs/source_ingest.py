@@ -7,6 +7,7 @@ import json
 import math
 import mimetypes
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -256,13 +257,18 @@ class SourceIngestor:
         cancel_check: CancelCheck,
         progress: ProgressCallback | None = None,
     ) -> PreparedSource:
-        attempt = self._bounded_path(attempt_dir, "attempt path")
+        attempt = Path(attempt_dir).absolute()
         expected_attempt = (
             self._data_dir / "episodes" / episode.id / "attempts"
             / (episode.current_job_id or "")
-        ).resolve()
-        if not episode.current_job_id or attempt != expected_attempt:
+        ).absolute()
+        if (
+            not episode.current_job_id
+            or attempt != expected_attempt
+            or _has_symlink_component(attempt, self._data_dir)
+        ):
             raise SourceIngestError("Invalid attempt path")
+        self._bounded_path(attempt, "attempt path")
         downloaded = episode.source_type == "url"
         try:
             _report(progress, 5)
@@ -333,10 +339,10 @@ class SourceIngestor:
                 media, metadata[0], metadata[1], metadata[3], poster, poster_type
             )
         except (JobCanceled, asyncio.CancelledError, SourceIngestError):
-            await _remove_attempt(attempt)
+            await _remove_attempt(attempt, expected_attempt, self._data_dir)
             raise
         except Exception:
-            await _remove_attempt(attempt)
+            await _remove_attempt(attempt, expected_attempt, self._data_dir)
             raise SourceIngestError("Media processing failed") from None
 
     def _bounded_path(self, path: Path, label: str) -> Path:
@@ -381,17 +387,17 @@ class PinnedHTTPClient:
             )
         except asyncio.TimeoutError:
             raise DownloadError("Remote connection timed out") from None
-        default_port = 443 if tls else 80
-        host_name = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
-        host = host_name if port == default_port else f"{host_name}:{port}"
-        target = parsed.path or "/"
-        if parsed.query:
-            target += "?" + parsed.query
-        request = (
-            f"GET {target} HTTP/1.1\r\nHost: {host}\r\nAccept: audio/*, video/*\r\n"
-            "Accept-Encoding: identity\r\nConnection: close\r\nUser-Agent: VIDA/2\r\n\r\n"
-        ).encode("ascii")
         try:
+            default_port = 443 if tls else 80
+            host_name = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+            host = host_name if port == default_port else f"{host_name}:{port}"
+            target = parsed.path or "/"
+            if parsed.query:
+                target += "?" + parsed.query
+            request = (
+                f"GET {target} HTTP/1.1\r\nHost: {host}\r\nAccept: audio/*, video/*\r\n"
+                "Accept-Encoding: identity\r\nConnection: close\r\nUser-Agent: VIDA/2\r\n\r\n"
+            ).encode("ascii")
             writer.write(request)
             await asyncio.wait_for(writer.drain(), self._timeouts.drain_sec)
             status_line = await asyncio.wait_for(
@@ -424,12 +430,9 @@ class PinnedHTTPClient:
             return _PinnedHTTPResponse(
                 reader, writer, status, headers, str(peer[0]), self._timeouts.close_sec
             )
-        except Exception as exc:
+        except BaseException as exc:
             writer.close()
-            try:
-                await asyncio.wait_for(writer.wait_closed(), self._timeouts.close_sec)
-            except asyncio.TimeoutError:
-                pass
+            await _bounded_writer_close(writer, self._timeouts.close_sec)
             if isinstance(exc, asyncio.TimeoutError):
                 raise DownloadError("Remote request timed out") from None
             raise
@@ -688,22 +691,54 @@ class SSRFProxy:
         self._token = secrets.token_urlsafe(24)
         self._server = None
         self._handlers: set[asyncio.Task] = set()
+        self._closing = False
         self.proxy_url = ""
 
     async def __aenter__(self):
-        self._server = await asyncio.start_server(self._accept, "127.0.0.1", 0)
+        self._closing = False
+        self._server = await asyncio.start_server(
+            self._on_client, "127.0.0.1", 0, limit=32 * 1024
+        )
         port = self._server.sockets[0].getsockname()[1]
         self.proxy_url = f"http://{self._token}:@127.0.0.1:{port}"
         return self
 
     async def __aexit__(self, *args):
+        self._closing = True
         if self._server is not None:
             self._server.close()
-            await self._server.wait_closed()
-        for task in tuple(self._handlers):
-            task.cancel()
-        if self._handlers:
-            await asyncio.gather(*tuple(self._handlers), return_exceptions=True)
+        # Accept callbacks already queued by the event loop may run just after
+        # close().  Require two empty loop turns so those callbacks are
+        # registered and joined too.
+        empty_turns = 0
+        while empty_turns < 2:
+            await asyncio.sleep(0)
+            tasks = tuple(self._handlers)
+            if not tasks:
+                empty_turns += 1
+                continue
+            empty_turns = 0
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if self._server is not None:
+            await asyncio.wait_for(
+                self._server.wait_closed(), self._timeouts.close_sec
+            )
+
+    def _on_client(self, reader, writer) -> None:
+        coroutine = (
+            self._close_rejected_client(writer)
+            if self._closing
+            else self._accept(reader, writer)
+        )
+        task = asyncio.create_task(coroutine)
+        self._handlers.add(task)
+        task.add_done_callback(self._handlers.discard)
+
+    async def _close_rejected_client(self, writer) -> None:
+        writer.close()
+        await _bounded_writer_close(writer, self._timeouts.close_sec)
 
     async def connect_target(
         self, host: str, port: int, cancel_check: CancelCheck
@@ -720,44 +755,37 @@ class SSRFProxy:
         reader, writer = await _await_phase(
             self._connector(selected, port), cancel_check, self._timeouts.connect_sec
         )
-        peer = writer.get_extra_info("peername")
-        rebound = await _await_phase(
-            self._resolver.resolve(host, port), cancel_check, self._timeouts.recheck_sec
-        )
-        rebound_addresses = tuple(str(ipaddress.ip_address(value)) for value in rebound)
-        if (
-            not peer or str(ipaddress.ip_address(peer[0])) != selected
-            or selected not in rebound_addresses
-            or any(not _is_public_unicast(value) for value in rebound_addresses)
-        ):
+        try:
+            peer = writer.get_extra_info("peername")
+            rebound = await _await_phase(
+                self._resolver.resolve(host, port), cancel_check,
+                self._timeouts.recheck_sec,
+            )
+            rebound_addresses = tuple(
+                str(ipaddress.ip_address(value)) for value in rebound
+            )
+            if (
+                not peer or str(ipaddress.ip_address(peer[0])) != selected
+                or selected not in rebound_addresses
+                or any(not _is_public_unicast(value) for value in rebound_addresses)
+            ):
+                raise DownloadError("Remote address changed")
+            return reader, writer
+        except BaseException:
             writer.close()
             await _bounded_writer_close(writer, self._timeouts.close_sec)
-            raise DownloadError("Remote address changed")
-        return reader, writer
+            raise
 
     async def _accept(self, reader, writer) -> None:
-        task = asyncio.current_task()
-        self._handlers.add(task)
         upstream = None
+        pumps: tuple[asyncio.Task, ...] = ()
         try:
             header = await asyncio.wait_for(
                 reader.readuntil(b"\r\n\r\n"), self._timeouts.headers_sec
             )
             if len(header) > 32 * 1024:
                 raise DownloadError("Proxy request headers are too large")
-            lines = header.decode("iso-8859-1").split("\r\n")
-            fields = {}
-            for line in lines[1:]:
-                if ":" in line:
-                    name, value = line.split(":", 1)
-                    fields[name.strip().lower()] = value.strip()
-            expected = base64.b64encode(f"{self._token}:".encode()).decode()
-            if fields.get("proxy-authorization") != f"Basic {expected}":
-                raise DownloadError("Proxy authentication failed")
-            parts = lines[0].split(" ")
-            if len(parts) != 3 or parts[0] != "CONNECT":
-                raise DownloadError("Proxy permits CONNECT only")
-            host, port = _split_connect_authority(parts[1])
+            host, port = _parse_connect_request(header, self._token)
             upstream_reader, upstream = await self.connect_target(
                 host, port, self._cancel_check
             )
@@ -778,12 +806,16 @@ class SSRFProxy:
             except Exception:
                 pass
         finally:
+            for pump in pumps:
+                if not pump.done():
+                    pump.cancel()
+            if pumps:
+                await asyncio.gather(*pumps, return_exceptions=True)
             if upstream is not None:
                 upstream.close()
                 await _bounded_writer_close(upstream, self._timeouts.close_sec)
             writer.close()
             await _bounded_writer_close(writer, self._timeouts.close_sec)
-            self._handlers.discard(task)
 
     async def _pump(self, reader, writer) -> None:
         transferred = 0
@@ -884,23 +916,82 @@ def _validated_remote_url(url: str):
     return parsed, port
 
 
-def _split_connect_authority(authority: str) -> tuple[str, int]:
+_HTTP_TOKEN = re.compile(rb"[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z")
+_CONNECT_LINE = re.compile(rb"CONNECT ([^ ]+) HTTP/(1\.[01])\Z")
+_DNS_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
+
+
+def _parse_connect_request(header: bytes, token: str) -> tuple[str, int]:
+    if len(header) > 32 * 1024 or not header.endswith(b"\r\n\r\n"):
+        raise DownloadError("Proxy request is invalid")
+    if b"\x00" in header or b"\n" in header.replace(b"\r\n", b""):
+        raise DownloadError("Proxy request is invalid")
+    lines = header[:-4].split(b"\r\n")
+    if not lines or len(lines) > 65:
+        raise DownloadError("Proxy request is invalid")
+    match = _CONNECT_LINE.fullmatch(lines[0])
+    if match is None:
+        raise DownloadError("Proxy permits CONNECT only")
     try:
-        parsed = urlsplit(f"https://{authority}")
-        if not parsed.hostname or parsed.username or parsed.password:
-            raise ValueError
-        port = parsed.port or 443
-    except ValueError:
+        authority = match.group(1).decode("ascii")
+    except UnicodeDecodeError:
         raise DownloadError("Proxy target is invalid") from None
-    if port not in {80, 443}:
+    fields: dict[bytes, bytes] = {}
+    for line in lines[1:]:
+        if not line or b":" not in line:
+            raise DownloadError("Proxy request is invalid")
+        name, value = line.split(b":", 1)
+        key = name.lower()
+        if _HTTP_TOKEN.fullmatch(name) is None or key in fields:
+            raise DownloadError("Proxy request is invalid")
+        value = value.strip(b" \t")
+        if any(byte < 32 and byte != 9 or byte == 127 for byte in value):
+            raise DownloadError("Proxy request is invalid")
+        fields[key] = value
+    expected = b"Basic " + base64.b64encode(f"{token}:".encode("ascii"))
+    if fields.get(b"proxy-authorization") != expected:
+        raise DownloadError("Proxy authentication failed")
+    return _split_connect_authority(authority)
+
+
+def _split_connect_authority(authority: str) -> tuple[str, int]:
+    if (
+        not authority
+        or any(ord(character) <= 32 or ord(character) == 127 for character in authority)
+        or any(character in authority for character in "/?#@\\")
+    ):
         raise DownloadError("Proxy target is invalid")
-    return parsed.hostname, port
+    if authority.startswith("["):
+        match = re.fullmatch(r"\[([^\]]+)\]:(80|443)", authority)
+        if match is None:
+            raise DownloadError("Proxy target is invalid")
+        try:
+            host = str(ipaddress.IPv6Address(match.group(1)))
+        except ValueError:
+            raise DownloadError("Proxy target is invalid") from None
+        return host, int(match.group(2))
+    if authority.count(":") != 1:
+        raise DownloadError("Proxy target is invalid")
+    host, raw_port = authority.rsplit(":", 1)
+    if raw_port not in {"80", "443"} or not host or "[" in host or "]" in host:
+        raise DownloadError("Proxy target is invalid")
+    try:
+        parsed_ip = ipaddress.ip_address(host)
+    except ValueError:
+        labels = host.split(".")
+        if len(host) > 253 or any(_DNS_LABEL.fullmatch(label) is None for label in labels):
+            raise DownloadError("Proxy target is invalid") from None
+    else:
+        if parsed_ip.version != 4:
+            raise DownloadError("Proxy target is invalid")
+        host = str(parsed_ip)
+    return host, int(raw_port)
 
 
 async def _bounded_writer_close(writer, timeout_sec: float) -> None:
     try:
         await asyncio.wait_for(writer.wait_closed(), timeout_sec)
-    except (asyncio.TimeoutError, ConnectionError):
+    except (asyncio.TimeoutError, ConnectionError, OSError):
         pass
 
 
@@ -1170,6 +1261,36 @@ def _report(callback, value: int) -> None:
         callback(value)
 
 
-async def _remove_attempt(attempt: Path) -> None:
-    if attempt.exists():
-        await asyncio.to_thread(shutil.rmtree, attempt)
+def _has_symlink_component(path: Path, root: Path) -> bool:
+    candidate = Path(path).absolute()
+    base = Path(root).absolute()
+    try:
+        relative = candidate.relative_to(base)
+    except ValueError:
+        return True
+    current = base
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
+async def _remove_attempt(attempt: Path, expected: Path, data_dir: Path) -> None:
+    candidate = Path(attempt).absolute()
+    if candidate != Path(expected).absolute():
+        return
+    if candidate.is_symlink():
+        await asyncio.to_thread(candidate.unlink, missing_ok=True)
+        return
+    if _has_symlink_component(candidate, data_dir):
+        return
+    try:
+        resolved = candidate.resolve()
+        root = Path(data_dir).resolve()
+    except OSError:
+        return
+    if resolved == root or root not in resolved.parents or resolved != candidate:
+        return
+    if candidate.is_dir():
+        await asyncio.to_thread(shutil.rmtree, candidate)

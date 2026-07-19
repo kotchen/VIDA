@@ -41,8 +41,10 @@ class MediaService:
 
     def reconcile_orphans(self) -> None:
         self._data_dir.mkdir(parents=True, exist_ok=True)
-        references = self._references()
         episodes = self._data_dir / "episodes"
+        if episodes.is_symlink():
+            episodes.unlink(missing_ok=True)
+            return
         if not episodes.is_dir():
             return
         for episode in tuple(episodes.iterdir()):
@@ -54,16 +56,29 @@ class MediaService:
                 root = episode / name
                 if root.is_symlink():
                     root.unlink(missing_ok=True)
+        references = self._references()
         for part in episodes.rglob("*.part"):
             self._unlink_local(part)
         for attempts in episodes.glob("*/attempts"):
             if not attempts.is_dir() or attempts.is_symlink():
                 continue
             for attempt in tuple(attempts.iterdir()):
-                if any(reference == attempt.resolve() or attempt.resolve() in reference.parents for reference in references):
+                if attempt.is_symlink():
+                    attempt.unlink(missing_ok=True)
                     continue
-                if attempt.is_dir() and not attempt.is_symlink():
-                    shutil.rmtree(attempt)
+                if self._has_symlink_component(attempt):
+                    continue
+                try:
+                    resolved_attempt = self._bounded(attempt)
+                except UnsafeMediaPath:
+                    continue
+                if any(
+                    reference == resolved_attempt or resolved_attempt in reference.parents
+                    for reference in references
+                ):
+                    continue
+                if attempt.is_dir():
+                    self._remove_tree(attempt)
                 else:
                     attempt.unlink(missing_ok=True)
             _rmdir_empty(attempts)
@@ -92,8 +107,11 @@ class MediaService:
                 path = Path(raw)
                 if path.is_absolute():
                     continue
+                candidate = self._data_dir / path
+                if self._has_symlink_component(candidate):
+                    continue
                 try:
-                    references.add(self._bounded(self._data_dir / path))
+                    references.add(self._bounded(candidate))
                 except UnsafeMediaPath:
                     continue
         return references
@@ -129,6 +147,23 @@ class MediaService:
             return
         if bounded.is_file():
             bounded.unlink(missing_ok=True)
+
+    def _remove_tree(self, path: Path) -> None:
+        candidate = Path(path)
+        if candidate.is_symlink():
+            candidate.unlink(missing_ok=True)
+            return
+        if self._has_symlink_component(candidate):
+            return
+        try:
+            bounded = self._bounded(candidate)
+        except UnsafeMediaPath:
+            return
+        # Pass the checked lexical path to rmtree.  Passing the resolved path
+        # would turn a last-moment link substitution into an external delete.
+        if bounded != candidate.absolute() or not candidate.is_dir():
+            return
+        shutil.rmtree(candidate)
 
 
 def _rmdir_empty(path: Path) -> None:
