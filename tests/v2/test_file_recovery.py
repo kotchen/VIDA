@@ -42,6 +42,9 @@ class FileRecoveryTests(unittest.TestCase):
         cross_episode = self.data / "episodes/e2/artifacts/media.mp4"
         with self.assertRaises(UnsafeMediaPath):
             service.commit_file(final, cross_episode)
+        source_staged = self._write("episodes/e1/source/not-an-attempt.mp4", b"x")
+        with self.assertRaises(UnsafeMediaPath):
+            service.commit_file(source_staged, self.data / "episodes/e1/artifacts/x.mp4")
 
     def test_reconcile_removes_parts_attempts_and_unreferenced_artifacts_but_preserves_references_and_sources(self):
         source = self._write("episodes/e1/source/upload.mp4", b"source")
@@ -81,6 +84,25 @@ class FileRecoveryTests(unittest.TestCase):
         ).reconcile_orphans()
         self.assertTrue(target.exists())
         self.assertFalse(alias.exists())
+
+    def test_reconciliation_unlinks_symlinked_managed_roots_without_traversal(self):
+        outside = Path(self.temp.name) / "outside"
+        outside.mkdir()
+        sentinel = outside / "sentinel.part"
+        sentinel.write_bytes(b"keep")
+        episode = self.data / "episodes/e1"
+        episode.mkdir(parents=True)
+        links = []
+        try:
+            for name in ("attempts", "artifacts", "poster"):
+                link = episode / name
+                link.symlink_to(outside, target_is_directory=True)
+                links.append(link)
+        except OSError as exc:
+            self.skipTest(f"symlink unavailable: {exc}")
+        MediaService(self.data, []).reconcile_orphans()
+        self.assertTrue(sentinel.exists())
+        self.assertTrue(all(not link.exists() for link in links))
 
     def _write(self, relative, value):
         path = self.data / relative

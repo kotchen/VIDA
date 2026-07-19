@@ -20,6 +20,8 @@ class MediaService:
         self._repositories = tuple(repositories)
 
     def commit_file(self, staged: Path, final: Path) -> None:
+        if self._has_symlink_component(staged) or self._has_symlink_component(final):
+            raise UnsafeMediaPath("media path contains a symlink")
         source = self._bounded(staged)
         destination = self._bounded(final)
         source_parts = source.relative_to(self._data_dir).parts
@@ -28,6 +30,7 @@ class MediaService:
             len(source_parts) < 4 or len(destination_parts) < 4
             or source_parts[0] != "episodes" or destination_parts[0] != "episodes"
             or source_parts[1] != destination_parts[1]
+            or source_parts[2] != "attempts" or len(source_parts) < 5
             or destination_parts[2] not in {"artifacts", "poster"}
         ):
             raise UnsafeMediaPath("media commit crosses episode or artifact boundary")
@@ -42,6 +45,15 @@ class MediaService:
         episodes = self._data_dir / "episodes"
         if not episodes.is_dir():
             return
+        for episode in tuple(episodes.iterdir()):
+            if episode.is_symlink() or not episode.is_dir():
+                if episode.is_symlink():
+                    episode.unlink(missing_ok=True)
+                continue
+            for name in ("attempts", "artifacts", "poster"):
+                root = episode / name
+                if root.is_symlink():
+                    root.unlink(missing_ok=True)
         for part in episodes.rglob("*.part"):
             self._unlink_local(part)
         for attempts in episodes.glob("*/attempts"):
@@ -91,6 +103,21 @@ class MediaService:
         if resolved == self._data_dir or self._data_dir not in resolved.parents:
             raise UnsafeMediaPath("media path escapes data/v2")
         return resolved
+
+    def _has_symlink_component(self, path: Path) -> bool:
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = self._data_dir / candidate
+        try:
+            relative = candidate.relative_to(self._data_dir)
+        except ValueError:
+            return False
+        current = self._data_dir
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                return True
+        return False
 
     def _unlink_local(self, path: Path) -> None:
         if path.is_symlink():

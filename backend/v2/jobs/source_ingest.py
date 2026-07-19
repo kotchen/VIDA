@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import ipaddress
 import json
 import math
 import mimetypes
+import os
+import secrets
 import shutil
 import socket
 import ssl
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -97,6 +100,7 @@ class ProcessRunner(Protocol):
     def run(
         self, command: Sequence[str], cancel_check: CancelCheck,
         timeout_sec: float | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> Awaitable[ProcessResult]: ...
 
 
@@ -134,18 +138,21 @@ class AsyncioProcessRunner:
         *,
         poll_interval_sec: float = 0.1,
         terminate_timeout_sec: float = 5.0,
+        kill_timeout_sec: float = 5.0,
         runtime_timeout_sec: float = 120.0,
         max_output_bytes: int = 1024 * 1024,
     ):
         self._factory = process_factory
         self._poll_interval = max(0, poll_interval_sec)
         self._terminate_timeout = max(0, terminate_timeout_sec)
+        self._kill_timeout = max(0, kill_timeout_sec)
         self._runtime_timeout = runtime_timeout_sec
         self._max_output_bytes = max_output_bytes
 
     async def run(
         self, command: Sequence[str], cancel_check: CancelCheck,
         timeout_sec: float | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> ProcessResult:
         if not command or not all(isinstance(value, str) for value in command):
             raise ValueError("command must contain string arguments")
@@ -157,6 +164,7 @@ class AsyncioProcessRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=min(self._max_output_bytes, 64 * 1024),
+                env=None if env is None else dict(env),
             )
         )
         try:
@@ -196,7 +204,10 @@ class AsyncioProcessRunner:
                 )
             stdout, stderr = communication.result()
         except asyncio.CancelledError:
-            await self._terminate(process, communication)
+            try:
+                await self._terminate(process, communication)
+            except SourceIngestError:
+                pass
             raise
         return ProcessResult(
             int(process.returncode),
@@ -212,7 +223,14 @@ class AsyncioProcessRunner:
         except asyncio.TimeoutError:
             if process.returncode is None:
                 process.kill()
-            await asyncio.shield(communication)
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(communication), self._kill_timeout
+                )
+            except asyncio.TimeoutError:
+                communication.cancel()
+                await asyncio.gather(communication, return_exceptions=True)
+                raise SourceIngestError("Media tool cleanup timed out") from None
 
 
 class SourceIngestor:
@@ -650,6 +668,139 @@ class URLValidator(Protocol):
     def validate_url(self, url: str, cancel_check: CancelCheck) -> Awaitable[None]: ...
 
 
+class SSRFProxy:
+    """Authenticated loopback CONNECT proxy with per-tunnel DNS and peer pinning."""
+
+    def __init__(
+        self,
+        *,
+        resolver: Resolver | None = None,
+        connector=asyncio.open_connection,
+        cancel_check: CancelCheck = lambda: False,
+        timeouts: TimeoutPolicy | None = None,
+        max_tunnel_bytes: int = 64 * 1024**2,
+    ):
+        self._resolver = resolver or SystemResolver()
+        self._connector = connector
+        self._cancel_check = cancel_check
+        self._timeouts = timeouts or TimeoutPolicy()
+        self._max_tunnel_bytes = max_tunnel_bytes
+        self._token = secrets.token_urlsafe(24)
+        self._server = None
+        self._handlers: set[asyncio.Task] = set()
+        self.proxy_url = ""
+
+    async def __aenter__(self):
+        self._server = await asyncio.start_server(self._accept, "127.0.0.1", 0)
+        port = self._server.sockets[0].getsockname()[1]
+        self.proxy_url = f"http://{self._token}:@127.0.0.1:{port}"
+        return self
+
+    async def __aexit__(self, *args):
+        if self._server is not None:
+            self._server.close()
+            await self._server.wait_closed()
+        for task in tuple(self._handlers):
+            task.cancel()
+        if self._handlers:
+            await asyncio.gather(*tuple(self._handlers), return_exceptions=True)
+
+    async def connect_target(
+        self, host: str, port: int, cancel_check: CancelCheck
+    ):
+        if port not in {80, 443}:
+            raise DownloadError("Remote URL is invalid")
+        raw = await _await_phase(
+            self._resolver.resolve(host, port), cancel_check, self._timeouts.dns_sec
+        )
+        addresses = tuple(str(ipaddress.ip_address(value)) for value in raw)
+        if not addresses or any(not _is_public_unicast(value) for value in addresses):
+            raise DownloadError("Remote address is not allowed")
+        selected = addresses[0]
+        reader, writer = await _await_phase(
+            self._connector(selected, port), cancel_check, self._timeouts.connect_sec
+        )
+        peer = writer.get_extra_info("peername")
+        rebound = await _await_phase(
+            self._resolver.resolve(host, port), cancel_check, self._timeouts.recheck_sec
+        )
+        rebound_addresses = tuple(str(ipaddress.ip_address(value)) for value in rebound)
+        if (
+            not peer or str(ipaddress.ip_address(peer[0])) != selected
+            or selected not in rebound_addresses
+            or any(not _is_public_unicast(value) for value in rebound_addresses)
+        ):
+            writer.close()
+            await _bounded_writer_close(writer, self._timeouts.close_sec)
+            raise DownloadError("Remote address changed")
+        return reader, writer
+
+    async def _accept(self, reader, writer) -> None:
+        task = asyncio.current_task()
+        self._handlers.add(task)
+        upstream = None
+        try:
+            header = await asyncio.wait_for(
+                reader.readuntil(b"\r\n\r\n"), self._timeouts.headers_sec
+            )
+            if len(header) > 32 * 1024:
+                raise DownloadError("Proxy request headers are too large")
+            lines = header.decode("iso-8859-1").split("\r\n")
+            fields = {}
+            for line in lines[1:]:
+                if ":" in line:
+                    name, value = line.split(":", 1)
+                    fields[name.strip().lower()] = value.strip()
+            expected = base64.b64encode(f"{self._token}:".encode()).decode()
+            if fields.get("proxy-authorization") != f"Basic {expected}":
+                raise DownloadError("Proxy authentication failed")
+            parts = lines[0].split(" ")
+            if len(parts) != 3 or parts[0] != "CONNECT":
+                raise DownloadError("Proxy permits CONNECT only")
+            host, port = _split_connect_authority(parts[1])
+            upstream_reader, upstream = await self.connect_target(
+                host, port, self._cancel_check
+            )
+            writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            await asyncio.wait_for(writer.drain(), self._timeouts.drain_sec)
+            pumps = (
+                asyncio.create_task(self._pump(reader, upstream)),
+                asyncio.create_task(self._pump(upstream_reader, writer)),
+            )
+            _, pending = await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
+            for pending_task in pending:
+                pending_task.cancel()
+            await asyncio.gather(*pumps, return_exceptions=True)
+        except Exception:
+            try:
+                writer.write(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")
+                await asyncio.wait_for(writer.drain(), self._timeouts.drain_sec)
+            except Exception:
+                pass
+        finally:
+            if upstream is not None:
+                upstream.close()
+                await _bounded_writer_close(upstream, self._timeouts.close_sec)
+            writer.close()
+            await _bounded_writer_close(writer, self._timeouts.close_sec)
+            self._handlers.discard(task)
+
+    async def _pump(self, reader, writer) -> None:
+        transferred = 0
+        while True:
+            _raise_if_canceled(self._cancel_check)
+            chunk = await asyncio.wait_for(
+                reader.read(64 * 1024), self._timeouts.body_idle_sec
+            )
+            if not chunk:
+                return
+            transferred += len(chunk)
+            if transferred > self._max_tunnel_bytes:
+                raise DownloadError("Proxy transfer limit exceeded")
+            writer.write(chunk)
+            await asyncio.wait_for(writer.drain(), self._timeouts.drain_sec)
+
+
 class YtDlpDownloader:
     """Resolve trusted platform pages, then fetch the selected media through SSRF controls."""
 
@@ -666,12 +817,16 @@ class YtDlpDownloader:
         *,
         max_bytes: int = 5 * 1024**3,
         timeout_sec: float = 120.0,
+        proxy_factory=None,
     ):
         self._runner = runner
         self._media = media_downloader
         self._validator = page_validator
         self._max_bytes = max_bytes
         self._timeout = timeout_sec
+        self._proxy_factory = proxy_factory or (
+            lambda cancel_check: SSRFProxy(cancel_check=cancel_check)
+        )
 
     async def download(
         self, url: str, directory: Path, cancel_check: CancelCheck,
@@ -682,15 +837,18 @@ class YtDlpDownloader:
         if not any(host == allowed or host.endswith("." + allowed) for allowed in self._PLATFORM_HOSTS):
             raise DownloadError("Unsupported page URL")
         await self._validator.validate_url(url, cancel_check)
-        result = await self._runner.run(
-            (
-                "yt-dlp", "--no-config", "--no-playlist", "--skip-download",
-                "--dump-single-json", "--no-warnings", "--socket-timeout", "15",
-                "--max-filesize", str(self._max_bytes), "--", url,
-            ),
-            cancel_check,
-            timeout_sec=self._timeout,
-        )
+        async with self._proxy_factory(cancel_check) as proxy:
+            result = await self._runner.run(
+                (
+                    "yt-dlp", "--no-config", "--no-plugin-dirs", "--no-playlist",
+                    "--skip-download", "--dump-single-json", "--no-warnings",
+                    "--socket-timeout", "15", "--max-filesize", str(self._max_bytes),
+                    "--proxy", proxy.proxy_url, "--", url,
+                ),
+                cancel_check,
+                timeout_sec=self._timeout,
+                env=_clean_subprocess_env(),
+            )
         if result.returncode != 0:
             raise DownloadError("Unable to resolve media page")
         try:
@@ -724,6 +882,36 @@ def _validated_remote_url(url: str):
     ):
         raise DownloadError("Remote URL is invalid")
     return parsed, port
+
+
+def _split_connect_authority(authority: str) -> tuple[str, int]:
+    try:
+        parsed = urlsplit(f"https://{authority}")
+        if not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError
+        port = parsed.port or 443
+    except ValueError:
+        raise DownloadError("Proxy target is invalid") from None
+    if port not in {80, 443}:
+        raise DownloadError("Proxy target is invalid")
+    return parsed.hostname, port
+
+
+async def _bounded_writer_close(writer, timeout_sec: float) -> None:
+    try:
+        await asyncio.wait_for(writer.wait_closed(), timeout_sec)
+    except (asyncio.TimeoutError, ConnectionError):
+        pass
+
+
+def _clean_subprocess_env() -> dict[str, str]:
+    blocked = {
+        "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+        "ytdlp_plugin_dir", "ytdlp_plugins",
+    }
+    cleaned = {key: value for key, value in os.environ.items() if key.lower() not in blocked}
+    cleaned["YTDLP_NO_PLUGINS"] = "1"
+    return cleaned
 
 
 async def _cancelable_chunks(
@@ -921,13 +1109,55 @@ def _content_length(raw: str | None) -> int | None:
 
 
 def _valid_jpeg(path: Path) -> bool:
-    if not path.is_file() or path.is_symlink() or path.stat().st_size < 4:
+    if (
+        not path.is_file() or path.is_symlink()
+        or not 16 <= path.stat().st_size <= 20 * 1024**2
+    ):
         return False
-    with path.open("rb") as stream:
-        head = stream.read(3)
-        stream.seek(-2, 2)
-        tail = stream.read(2)
-    return head == b"\xff\xd8\xff" and tail == b"\xff\xd9"
+    data = path.read_bytes()
+    if not data.startswith(b"\xff\xd8"):
+        return False
+    offset = 2
+    saw_frame = False
+    while offset + 4 <= len(data):
+        if data[offset] != 0xFF:
+            return False
+        while offset < len(data) and data[offset] == 0xFF:
+            offset += 1
+        if offset >= len(data):
+            return False
+        marker = data[offset]
+        offset += 1
+        if marker == 0xD9:
+            return False
+        if marker == 0xDA:
+            if not saw_frame or offset + 2 > len(data):
+                return False
+            length = int.from_bytes(data[offset:offset + 2], "big")
+            if length < 6 or offset + length > len(data):
+                return False
+            offset += length
+            while offset + 1 < len(data):
+                marker_at = data.find(b"\xff", offset)
+                if marker_at < 0 or marker_at + 1 >= len(data):
+                    return False
+                following = data[marker_at + 1]
+                if following == 0x00 or 0xD0 <= following <= 0xD7:
+                    offset = marker_at + 2
+                    continue
+                return following == 0xD9
+            return False
+        if marker in {0x01, *range(0xD0, 0xD8)} or offset + 2 > len(data):
+            return False
+        length = int.from_bytes(data[offset:offset + 2], "big")
+        if length < 2 or offset + length > len(data):
+            return False
+        if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}:
+            if length < 8:
+                return False
+            saw_frame = True
+        offset += length
+    return False
 
 
 def _raise_if_canceled(cancel_check: CancelCheck) -> None:

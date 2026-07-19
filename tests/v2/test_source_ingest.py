@@ -18,7 +18,10 @@ from backend.v2.jobs.source_ingest import (
 
 
 class FakeRunner:
-    def __init__(self, probe: dict, *, poster: bytes = b"\xff\xd8\xff\xd9", returncode: int = 0):
+    def __init__(self, probe: dict, *, poster: bytes = (
+        b"\xff\xd8\xff\xc0\x00\x0b\x08\x00\x01\x00\x01\x01\x01\x11\x00"
+        b"\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\xff\xd9"
+    ), returncode: int = 0):
         self.probe = probe
         self.poster = poster
         self.returncode = returncode
@@ -77,7 +80,7 @@ class SourceIngestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared.resolution, "1080p")
         self.assertEqual(prepared.media_content_type, "video/mp4")
         self.assertEqual(prepared.poster_content_type, "image/jpeg")
-        self.assertEqual(prepared.poster_path.read_bytes(), b"\xff\xd8\xff\xd9")
+        self.assertTrue(prepared.poster_path.read_bytes().startswith(b"\xff\xd8\xff\xc0"))
         self.assertEqual([command[0] for command in runner.commands], ["ffprobe", "ffmpeg"])
         self.assertTrue(all(isinstance(command, tuple) for command in runner.commands))
         self.assertEqual(progress, [5, 12, 20])

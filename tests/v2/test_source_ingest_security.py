@@ -17,6 +17,7 @@ from backend.v2.jobs.source_ingest import (
     SourceIngestor,
     TimeoutPolicy,
     YtDlpDownloader,
+    SSRFProxy,
 )
 from tests.v2.test_source_ingest import FakeDownloader, FakeRunner, _episode
 from tests.v2.test_secure_download import FakeClient, FakeResolver, FakeResponse
@@ -134,6 +135,18 @@ class SourceBoundarySecurityTests(unittest.IsolatedAsyncioTestCase):
                 runner, FakeDownloader(), data_dir=self.data, audio_poster=self.poster,
             ).prepare(_episode(source_path=source.relative_to(self.data).as_posix()), self.attempt, lambda: False)
 
+    async def test_fake_soi_eoi_without_jpeg_structure_is_rejected(self):
+        source = self.source_dir / "clip.mp4"
+        source.write_bytes(b"video")
+        runner = FakeRunner({
+            "format": {"duration": "1", "format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+            "streams": [{"codec_type": "video", "width": 10, "height": 10}],
+        }, poster=b"\xff\xd8\xff\xd9")
+        with self.assertRaisesRegex(SourceIngestError, "poster"):
+            await SourceIngestor(
+                runner, FakeDownloader(), data_dir=self.data, audio_poster=self.poster,
+            ).prepare(_episode(source_path=source.relative_to(self.data).as_posix()), self.attempt, lambda: False)
+
 
 class YtDlpAcquisitionTests(unittest.IsolatedAsyncioTestCase):
     async def test_supported_pages_resolve_once_then_use_secure_downloader(self):
@@ -141,8 +154,9 @@ class YtDlpAcquisitionTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.commands = []
 
-            async def run(self, command, cancel_check, timeout_sec=None):
+            async def run(self, command, cancel_check, timeout_sec=None, env=None):
                 self.commands.append(tuple(command))
+                self.env = env
                 return ProcessResult(0, json.dumps({"url": "https://cdn.example/media.mp4"}), "")
 
         class Policy:
@@ -160,13 +174,29 @@ class YtDlpAcquisitionTests(unittest.IsolatedAsyncioTestCase):
                 target.write_bytes(b"x")
                 return target
 
+        class Proxy:
+            proxy_url = "http://secret@127.0.0.1:32123"
+
+            def __init__(self):
+                self.entered = self.exited = False
+
+            async def __aenter__(self):
+                self.entered = True
+                return self
+
+            async def __aexit__(self, *args):
+                self.exited = True
+
         for url in (
             "https://www.youtube.com/watch?v=x", "https://www.bilibili.com/video/x",
             "https://www.tiktok.com/@a/video/1", "https://soundcloud.com/a/b",
         ):
             with self.subTest(url=url):
-                runner, media = Runner(), Media()
-                path = await YtDlpDownloader(runner, media, Policy(), max_bytes=123).download(
+                runner, media, proxy = Runner(), Media(), Proxy()
+                path = await YtDlpDownloader(
+                    runner, media, Policy(), max_bytes=123,
+                    proxy_factory=lambda cancel_check: proxy,
+                ).download(
                     url, Path(tempfile.mkdtemp()), lambda: False
                 )
                 command = " ".join(runner.commands[0])
@@ -174,12 +204,17 @@ class YtDlpAcquisitionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("--no-config", command)
                 self.assertIn("--max-filesize 123", command)
                 self.assertIn("--skip-download", command)
+                self.assertIn("--no-plugin-dirs", command)
+                self.assertIn("--proxy http://secret@127.0.0.1:32123", command)
                 self.assertEqual(media.calls, ["https://cdn.example/media.mp4"])
+                self.assertTrue(proxy.entered and proxy.exited)
+                self.assertFalse(any(key.lower() in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"} for key in runner.env))
+                self.assertEqual(runner.env.get("YTDLP_NO_PLUGINS"), "1")
                 self.assertTrue(path.exists())
 
     async def test_unsupported_page_and_extractor_failure_are_sanitized(self):
         class Runner:
-            async def run(self, command, cancel_check, timeout_sec=None):
+            async def run(self, command, cancel_check, timeout_sec=None, env=None):
                 return ProcessResult(1, "", "secret")
 
         class Policy:
@@ -194,7 +229,65 @@ class YtDlpAcquisitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret", str(raised.exception))
 
 
+class ControlledProxyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_private_and_rebinding_targets_are_rejected_without_fallback(self):
+        class Connector:
+            def __init__(self):
+                self.calls = []
+
+            async def __call__(self, host, port):
+                self.calls.append((host, port))
+                writer = type("Writer", (), {
+                    "get_extra_info": lambda self, name: (host, port),
+                    "close": lambda self: None,
+                    "wait_closed": lambda self: asyncio.sleep(0),
+                })()
+                return object(), writer
+
+        connector = Connector()
+        with self.assertRaises(DownloadError):
+            await SSRFProxy(
+                resolver=FakeResolver([["127.0.0.1"]]), connector=connector
+            ).connect_target("example.com", 443, lambda: False)
+        self.assertEqual(connector.calls, [])
+
+        connector = Connector()
+        with self.assertRaisesRegex(DownloadError, "changed"):
+            await SSRFProxy(
+                resolver=FakeResolver([["8.8.8.8"], ["1.1.1.1"]]),
+                connector=connector,
+            ).connect_target("example.com", 443, lambda: False)
+        self.assertEqual(connector.calls, [("8.8.8.8", 443)])
+
+
 class TimeoutSecurityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stuck_post_kill_join_is_bounded_and_leaves_no_capture_task(self):
+        finished = asyncio.Event()
+
+        class Process:
+            returncode = None
+
+            async def communicate(self):
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    finished.set()
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+        async def factory(*args, **kwargs):
+            return Process()
+
+        with self.assertRaisesRegex(SourceIngestError, "cleanup timed out"):
+            await AsyncioProcessRunner(
+                factory, runtime_timeout_sec=0.001,
+                terminate_timeout_sec=0.001, kill_timeout_sec=0.001,
+            ).run(("ffprobe", "x"), lambda: False)
+        self.assertTrue(finished.is_set())
     async def test_stalled_process_creation_obeys_runtime_timeout(self):
         async def factory(*args, **kwargs):
             await asyncio.Event().wait()
