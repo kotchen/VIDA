@@ -4,11 +4,12 @@ import asyncio
 import json
 import math
 import re
+import inspect
 from collections.abc import Mapping, Sequence
 from typing import Protocol
 from uuid import uuid4
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 if __package__ == "v2.jobs":
     from llm_sanitize import strip_llm_artifacts
@@ -37,29 +38,40 @@ class CompletionRunner(Protocol):
 class OpenAICompletionRunner:
     """Create and close one provider client for each request."""
 
-    def __init__(self, timeout_sec: float = 120.0):
+    def __init__(self, timeout_sec: float = 120.0, client_factory=AsyncOpenAI):
         self._timeout_sec = timeout_sec
+        self._client_factory = client_factory
 
     async def complete(self, credentials, messages, response_format) -> str:
-        def request() -> str:
-            client = OpenAI(
-                api_key=credentials.api_key,
-                base_url=credentials.base_url,
-                timeout=self._timeout_sec,
-                max_retries=0,
+        client = self._client_factory(
+            api_key=credentials.api_key,
+            base_url=credentials.base_url,
+            timeout=self._timeout_sec,
+            max_retries=0,
+        )
+        error = None
+        response = None
+        canceled = False
+        try:
+            response = await client.chat.completions.create(
+                model=credentials.model_id,
+                temperature=credentials.temperature,
+                messages=list(messages),
+                response_format=dict(response_format),
             )
-            try:
-                response = client.chat.completions.create(
-                    model=credentials.model_id,
-                    temperature=credentials.temperature,
-                    messages=list(messages),
-                    response_format=dict(response_format),
-                )
-                return response.choices[0].message.content or ""
-            finally:
-                client.close()
-
-        return await asyncio.to_thread(request)
+        except asyncio.CancelledError as exc:
+            error = exc
+            canceled = True
+            _consume_current_cancellation()
+        except BaseException as exc:
+            error = exc
+        close_task = asyncio.create_task(_call_close(client))
+        canceled, _ = await _await_task_safely(close_task, canceled)
+        if canceled:
+            raise asyncio.CancelledError from None
+        if error is not None:
+            raise error
+        return response.choices[0].message.content or ""
 
 
 class AIProcessor:
@@ -80,8 +92,7 @@ class AIProcessor:
 
     async def optimize(self, transcript: str) -> str:
         credentials = self._credentials
-
-        def run() -> str:
+        try:
             summarizer = self._summarizer_factory(
                 api_key=credentials.api_key,
                 base_url=credentials.base_url,
@@ -90,22 +101,37 @@ class AIProcessor:
                 raise_on_error=True,
                 request_timeout_sec=self._timeout_sec,
             )
-            try:
-                return asyncio.run(summarizer.optimize_transcript(transcript))
-            finally:
-                client = getattr(summarizer, "client", None)
-                close = getattr(client, "close", None)
-                if close is not None:
-                    close()
-
-        try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(run), timeout=self._timeout_sec
-            )
-        except asyncio.CancelledError:
-            raise
         except Exception:
             raise AIExecutionError("AI request failed") from None
+
+        def run() -> str:
+            return asyncio.run(summarizer.optimize_transcript(transcript))
+
+        operation = asyncio.create_task(asyncio.to_thread(run))
+        try:
+            result = await asyncio.wait_for(
+                asyncio.shield(operation), timeout=self._timeout_sec
+            )
+        except asyncio.CancelledError:
+            _consume_current_cancellation()
+            canceled = await _close_summarizer(summarizer, True)
+            canceled, _ = await _await_task_safely(operation, canceled)
+            raise asyncio.CancelledError from None
+        except asyncio.TimeoutError:
+            canceled = await _close_summarizer(summarizer, False)
+            canceled, _ = await _await_task_safely(operation, canceled)
+            if canceled:
+                raise asyncio.CancelledError from None
+            raise AIExecutionError("AI request failed") from None
+        except Exception:
+            canceled = await _close_summarizer(summarizer, False)
+            if canceled:
+                raise asyncio.CancelledError from None
+            raise AIExecutionError("AI request failed") from None
+        canceled = await _close_summarizer(summarizer, False)
+        if canceled:
+            raise asyncio.CancelledError
+        return result
 
     async def summarize(
         self,
@@ -255,3 +281,41 @@ def _one_line_title(value) -> str:
     if not title:
         raise ValueError
     return title
+
+
+async def _close_summarizer(summarizer, canceled: bool) -> bool:
+    client = getattr(summarizer, "client", None)
+    close = getattr(client, "close", None)
+    if close is None:
+        return canceled
+    task = asyncio.create_task(asyncio.to_thread(close))
+    canceled, _ = await _await_task_safely(task, canceled)
+    return canceled
+
+
+async def _call_close(client) -> None:
+    result = client.close()
+    if inspect.isawaitable(result):
+        await result
+
+
+async def _await_task_safely(task: asyncio.Task, canceled: bool = False):
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            canceled = True
+            _consume_current_cancellation()
+    try:
+        result = task.result()
+    except BaseException:
+        if canceled:
+            raise asyncio.CancelledError from None
+        raise
+    return canceled, result
+
+
+def _consume_current_cancellation() -> None:
+    current = asyncio.current_task()
+    if current is not None:
+        current.uncancel()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -74,6 +75,7 @@ class EpisodePipeline:
             )
             if not transcription.segments:
                 raise ValueError("empty transcription")
+            validated_segments = _validate_segments(transcription.segments)
         except (JobCanceled, asyncio.CancelledError):
             await _remove_attempt(attempt, attempt, self._data_dir)
             raise
@@ -86,30 +88,34 @@ class EpisodePipeline:
                 str(uuid4()), episode.id, index, row.start_sec, row.end_sec,
                 None, row.text,
             )
-            for index, row in enumerate(transcription.segments)
+            for index, row in enumerate(validated_segments)
         ]
+        core_committed = False
         try:
             media_path, poster_path = await self._commit_core_files(
                 episode.id, job.id, attempt, prepared, cancel_check
             )
-            await self._stage(
-                job, 60, "Saving transcript", cancel_check,
-                asyncio.to_thread(
-                    self._episodes.commit_core_output,
-                    episode.id,
-                    records,
-                    language=transcription.language,
-                    media_path=media_path,
-                    media_content_type=prepared.media_content_type,
-                    poster_path=poster_path,
-                    poster_content_type=prepared.poster_content_type,
-                    duration_sec=prepared.duration_sec,
-                    resolution=prepared.resolution,
-                    updated_at=self._now(),
-                ),
+            task_canceled, user_canceled = await self._commit_core_output(
+                job,
+                cancel_check,
+                episode.id,
+                records,
+                language=transcription.language,
+                media_path=media_path,
+                media_content_type=prepared.media_content_type,
+                poster_path=poster_path,
+                poster_content_type=prepared.poster_content_type,
+                duration_sec=prepared.duration_sec,
+                resolution=prepared.resolution,
+                updated_at=self._now(),
             )
+            core_committed = True
+            if task_canceled:
+                raise asyncio.CancelledError
+            if user_canceled:
+                raise JobCanceled
         except BaseException:
-            if "media_path" in locals():
+            if not core_committed and "media_path" in locals():
                 await self._remove_uncommitted_files(media_path, poster_path)
             raise
         finally:
@@ -135,15 +141,14 @@ class EpisodePipeline:
                     episode.id, optimized, episode.summary_language, episode.title
                 ),
             )
-        except (JobCanceled, asyncio.CancelledError):
-            raise
-        except Exception:
-            warnings.append(_warning("summary"))
-        else:
             await self._stage(
                 job, 82, "Saving summary", cancel_check,
                 asyncio.to_thread(self._episodes.replace_summary, episode.id, summary),
             )
+        except (JobCanceled, asyncio.CancelledError):
+            raise
+        except Exception:
+            warnings.append(_warning("summary"))
 
         try:
             generated = await self._stage(
@@ -152,17 +157,16 @@ class EpisodePipeline:
                     episode.id, optimized, prepared.duration_sec, poster_path
                 ),
             )
-        except (JobCanceled, asyncio.CancelledError):
-            raise
-        except Exception:
-            warnings.append(_warning("chapters"))
-        else:
             await self._stage(
                 job, 94, "Saving chapters", cancel_check,
                 asyncio.to_thread(
                     self._chapters.replace_generated, episode.id, generated
                 ),
             )
+        except (JobCanceled, asyncio.CancelledError):
+            raise
+        except Exception:
+            warnings.append(_warning("chapters"))
 
         await self._stage(
             job, 95, "Finalizing", cancel_check,
@@ -208,6 +212,49 @@ class EpisodePipeline:
             final_media.relative_to(self._data_dir).as_posix(),
             final_poster.relative_to(self._data_dir).as_posix(),
         )
+
+    async def _commit_core_output(
+        self, job, cancel_check, episode_id, records, **metadata
+    ) -> tuple[bool, bool]:
+        self._check_cancel(cancel_check)
+        await asyncio.to_thread(
+            self._jobs.update_progress,
+            job.id,
+            60,
+            "Saving transcript",
+            self._now(),
+        )
+        operation = asyncio.create_task(
+            asyncio.to_thread(
+                self._episodes.commit_core_output,
+                episode_id,
+                records,
+                **metadata,
+            )
+        )
+        task_canceled = False
+        user_canceled = False
+        while not operation.done():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(operation), self._heartbeat_interval
+                )
+                done = True
+            except asyncio.TimeoutError:
+                done = False
+            except asyncio.CancelledError:
+                task_canceled = True
+                _consume_current_cancellation()
+                continue
+            if cancel_check():
+                user_canceled = True
+        try:
+            operation.result()
+        except BaseException:
+            if task_canceled:
+                raise asyncio.CancelledError from None
+            raise
+        return task_canceled, user_canceled or cancel_check()
 
     async def _remove_uncommitted_files(self, *relative_paths: str) -> None:
         candidates = [self._data_dir / Path(value) for value in relative_paths]
@@ -273,3 +320,39 @@ class EpisodePipeline:
 
 def _warning(stage: str) -> ProcessingWarning:
     return ProcessingWarning(stage, "ai_stage_failed", f"{stage.title()} unavailable")
+
+
+def _validate_segments(segments):
+    validated = []
+    previous_end = 0.0
+    for index, segment in enumerate(segments):
+        start = segment.start_sec
+        end = segment.end_sec
+        text = segment.text
+        if (
+            type(start) not in {int, float}
+            or type(end) not in {int, float}
+            or not math.isfinite(float(start))
+            or not math.isfinite(float(end))
+            or float(start) < 0
+            or float(end) <= float(start)
+            or (index > 0 and float(start) < previous_end)
+            or not isinstance(text, str)
+        ):
+            raise ValueError("invalid transcript segment")
+        normalized_text = text.strip()
+        if not normalized_text or len(normalized_text) > 100_000:
+            raise ValueError("invalid transcript segment")
+        validated.append(
+            TranscriptSegmentRecord(
+                "", "", index, float(start), float(end), None, normalized_text
+            )
+        )
+        previous_end = float(end)
+    return validated
+
+
+def _consume_current_cancellation() -> None:
+    current = asyncio.current_task()
+    if current is not None:
+        current.uncancel()

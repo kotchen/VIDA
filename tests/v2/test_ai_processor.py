@@ -1,8 +1,9 @@
 import asyncio
 import json
+import threading
 import unittest
 
-from backend.v2.jobs.ai import AIExecutionError, AIProcessor
+from backend.v2.jobs.ai import AIExecutionError, AIProcessor, OpenAICompletionRunner
 from backend.v2.services.provider_profiles import ProviderRevisionCredentials
 
 
@@ -26,6 +27,57 @@ class RecordingRunner:
 
 
 class AIProcessorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_async_provider_timeout_closes_request_client(self):
+        closed = asyncio.Event()
+
+        class Completions:
+            async def create(self, **kwargs):
+                await asyncio.Event().wait()
+
+        class Client:
+            def __init__(self, **kwargs):
+                self.chat = type("Chat", (), {"completions": Completions()})()
+
+            async def close(self):
+                closed.set()
+
+        runner = OpenAICompletionRunner(0.02, client_factory=Client)
+        with self.assertRaisesRegex(AIExecutionError, "AI request failed"):
+            await AIProcessor(
+                CREDENTIALS, runner=runner, timeout_sec=0.02
+            ).summarize("episode-1", "text", "en", "Title")
+        self.assertTrue(closed.is_set())
+
+    async def test_optimization_cancellation_closes_client_and_joins_worker(self):
+        started = threading.Event()
+        release = threading.Event()
+        closed = threading.Event()
+
+        class Client:
+            def close(self):
+                closed.set()
+                release.set()
+
+        class Summarizer:
+            def __init__(self, **kwargs):
+                self.client = Client()
+
+            async def optimize_transcript(self, transcript):
+                started.set()
+                release.wait(timeout=2)
+                return transcript
+
+        task = asyncio.create_task(
+            AIProcessor(CREDENTIALS, summarizer_factory=Summarizer).optimize("raw")
+        )
+        self.assertTrue(await asyncio.to_thread(started.wait, 1))
+        task.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(closed.is_set())
+
     async def test_optimization_requests_strict_failure_and_closes_request_client(self):
         captured = {}
 

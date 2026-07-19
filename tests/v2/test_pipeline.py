@@ -1,7 +1,10 @@
 import asyncio
+import math
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from backend.transcriber import StructuredTranscription, TranscriptSegment
 from backend.v2.database import Database
@@ -124,7 +127,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.jobs.enqueue(queued)
         self.job = self.jobs.claim_next("worker-1", NOW)
 
-    def make_pipeline(self, ai, *, transcriber=None, heartbeat=5.0):
+    def make_pipeline(
+        self, ai, *, transcriber=None, heartbeat=5.0, episodes=None, chapters=None
+    ):
         captured = []
 
         def ai_factory(credentials):
@@ -134,8 +139,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         pipeline = EpisodePipeline(
             data_dir=self.data,
             profiles=self.profiles,
-            episodes=self.episodes,
-            chapters=self.chapters,
+            episodes=episodes or self.episodes,
+            chapters=chapters or self.chapters,
             jobs=self.jobs,
             media=Media(),
             source=Source(),
@@ -176,6 +181,111 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.episodes.get_summary("episode-1").generated_by, "VIDA")
         self.assertEqual([row.title for row in self.chapters.list("episode-1")], ["Opening"])
 
+    async def test_cancel_immediately_after_core_commit_keeps_new_references(self):
+        self._seed_old_media()
+        canceled = False
+        original = self.episodes.commit_core_output
+
+        def commit(*args, **kwargs):
+            nonlocal canceled
+            original(*args, **kwargs)
+            canceled = True
+
+        self.episodes.commit_core_output = commit
+        pipeline, _ = self.make_pipeline(AI())
+        with self.assertRaises(JobCanceled):
+            await pipeline.execute(self.job, lambda: canceled)
+
+        episode = self.episodes.get("episode-1")
+        self.assertNotEqual(episode.media_path, "episodes/episode-1/artifacts/old.mp3")
+        self.assertTrue((self.data / episode.media_path).is_file())
+        self.assertTrue((self.data / episode.poster_path).is_file())
+        self.assertTrue((self.data / "episodes/episode-1/artifacts/old.mp3").is_file())
+
+    async def test_cancel_during_blocked_core_commit_waits_and_keeps_references(self):
+        started = threading.Event()
+        release = threading.Event()
+        canceled = False
+        original = self.episodes.commit_core_output
+
+        def commit(*args, **kwargs):
+            started.set()
+            release.wait(timeout=2)
+            original(*args, **kwargs)
+
+        self.episodes.commit_core_output = commit
+        pipeline, _ = self.make_pipeline(AI(), heartbeat=0.01)
+        task = asyncio.create_task(pipeline.execute(self.job, lambda: canceled))
+        self.assertTrue(await asyncio.to_thread(started.wait, 1))
+        canceled = True
+        release.set()
+        with self.assertRaises(JobCanceled):
+            await task
+
+        episode = self.episodes.get("episode-1")
+        self.assertTrue((self.data / episode.media_path).is_file())
+        self.assertTrue((self.data / episode.poster_path).is_file())
+
+    async def test_repeated_task_cancel_during_core_commit_joins_before_propagating(self):
+        started = threading.Event()
+        release = threading.Event()
+        original = self.episodes.commit_core_output
+
+        def commit(*args, **kwargs):
+            started.set()
+            release.wait(timeout=2)
+            original(*args, **kwargs)
+
+        self.episodes.commit_core_output = commit
+        pipeline, _ = self.make_pipeline(AI(), heartbeat=0.01)
+        task = asyncio.create_task(pipeline.execute(self.job, lambda: False))
+        self.assertTrue(await asyncio.to_thread(started.wait, 1))
+        task.cancel()
+        await asyncio.sleep(0.02)
+        self.assertFalse(task.done())
+        task.cancel()
+        await asyncio.sleep(0.02)
+        self.assertFalse(task.done())
+        release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        episode = self.episodes.get("episode-1")
+        self.assertTrue((self.data / episode.media_path).is_file())
+        self.assertTrue((self.data / episode.poster_path).is_file())
+
+    async def test_summary_write_failure_warns_and_preserves_previous_summary(self):
+        old = SummaryRecord("episode-1", "Old summary", 1, 1, 80, "VIDA")
+        self.episodes.replace_summary("episode-1", old)
+
+        def fail(*args, **kwargs):
+            raise RuntimeError("database detail")
+
+        self.episodes.replace_summary = fail
+        pipeline, _ = self.make_pipeline(AI())
+        await pipeline.execute(self.job, lambda: False)
+
+        self.assertEqual(self.episodes.get_summary("episode-1"), old)
+        self.assertEqual(self.jobs.get_required("job-1").status, "completed")
+        self.assertEqual([w.stage for w in self.episodes.get("episode-1").warnings], ["summary"])
+
+    async def test_chapter_write_failure_warns_and_preserves_previous_generated(self):
+        old = ChapterRecord(
+            "old-chapter", "episode-1", 0, "Old chapter", 30, None, False, "generated"
+        )
+        self.chapters.replace_generated("episode-1", [old])
+
+        def fail(*args, **kwargs):
+            raise RuntimeError("database detail")
+
+        self.chapters.replace_generated = fail
+        pipeline, _ = self.make_pipeline(AI())
+        await pipeline.execute(self.job, lambda: False)
+
+        self.assertEqual(self.chapters.list("episode-1"), [old])
+        self.assertEqual(self.jobs.get_required("job-1").status, "completed")
+        self.assertEqual([w.stage for w in self.episodes.get("episode-1").warnings], ["chapters"])
+
     async def test_transcription_failure_is_a_core_pipeline_error(self):
         pipeline, _ = self.make_pipeline(
             AI(), transcriber=Transcriber(RuntimeError("provider secret"))
@@ -194,6 +304,44 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TranscriptionFailed):
             await pipeline.execute(self.job, lambda: False)
         self.assertEqual(self.jobs.get_required("job-1").status, "processing")
+
+    async def test_invalid_structured_segments_are_core_failures(self):
+        invalid = [
+            [SimpleNamespace(start_sec=True, end_sec=1, text="text")],
+            [SimpleNamespace(start_sec=0, end_sec=math.nan, text="text")],
+            [SimpleNamespace(start_sec=0, end_sec=math.inf, text="text")],
+            [SimpleNamespace(start_sec=-1, end_sec=1, text="text")],
+            [SimpleNamespace(start_sec=2, end_sec=1, text="text")],
+            [SimpleNamespace(start_sec=0, end_sec=1, text="   ")],
+            [SimpleNamespace(start_sec=0, end_sec=1, text="x" * 100_001)],
+            [
+                SimpleNamespace(start_sec=2, end_sec=3, text="later"),
+                SimpleNamespace(start_sec=0, end_sec=1, text="earlier"),
+            ],
+            [
+                SimpleNamespace(start_sec=0, end_sec=2, text="one"),
+                SimpleNamespace(start_sec=1, end_sec=3, text="overlap"),
+            ],
+        ]
+        for segments in invalid:
+            with self.subTest(segments=segments):
+                pipeline, _ = self.make_pipeline(
+                    AI(), transcriber=Transcriber(segments=segments)
+                )
+                with self.assertRaises(TranscriptionFailed):
+                    await pipeline.execute(self.job, lambda: False)
+
+    async def test_adjacent_finite_segments_and_maximum_text_are_valid(self):
+        segments = [
+            SimpleNamespace(start_sec=0, end_sec=1, text="x" * 100_000),
+            SimpleNamespace(start_sec=1, end_sec=2, text="boundary"),
+        ]
+        pipeline, _ = self.make_pipeline(AI(), transcriber=Transcriber(segments=segments))
+        await pipeline.execute(self.job, lambda: False)
+        persisted = self.episodes.get_transcript("episode-1")
+        self.assertEqual([(row.ordinal, row.start_sec, row.end_sec) for row in persisted], [
+            (0, 0.0, 1.0), (1, 1.0, 2.0)
+        ])
 
     async def test_heartbeat_refreshes_during_long_transcription_and_cancel_is_checked_after(self):
         gate = asyncio.Event()
@@ -236,6 +384,23 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         scheduler = Scheduler(self.jobs, pipeline, 1, 1)
         await scheduler._execute(self.job)
         self.assertEqual(self.jobs.get_required("job-1").status, "completed")
+
+    def _seed_old_media(self):
+        media = self.data / "episodes/episode-1/artifacts/old.mp3"
+        poster = self.data / "episodes/episode-1/poster/old.png"
+        media.parent.mkdir(parents=True, exist_ok=True)
+        poster.parent.mkdir(parents=True, exist_ok=True)
+        media.write_bytes(b"old-media")
+        poster.write_bytes(b"old-poster")
+        with self.database.transaction() as conn:
+            conn.execute(
+                "UPDATE episodes SET media_path=?,media_content_type=?,poster_path=?,"
+                "poster_content_type=? WHERE id='episode-1'",
+                (
+                    "episodes/episode-1/artifacts/old.mp3", "audio/mpeg",
+                    "episodes/episode-1/poster/old.png", "image/png",
+                ),
+            )
 
 
 if __name__ == "__main__":
