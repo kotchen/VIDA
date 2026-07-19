@@ -22,7 +22,7 @@ export function SummaryCard({ summary }: { summary: Summary }) {
       <p className="text-sm leading-relaxed text-cream/90">{summary.content}</p>
       <div className="mt-auto grid grid-cols-3 gap-2">
         {stats.map(({ icon: Icon, value, label }) => (
-          <div key={label} className="flex flex-col items-center gap-1 rounded-xl bg-raised py-2.5">
+          <div key={label} className="flex flex-col items-center gap-0.5 rounded-xl bg-raised py-2">
             <Icon className="size-4 text-copper-300" />
             <span className="tnum text-sm font-semibold">{value}</span>
             <span className="text-[10px] text-muted-warm">{label}</span>

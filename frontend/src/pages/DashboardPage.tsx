@@ -21,26 +21,26 @@ export function DashboardPage() {
   }
 
   return (
-    <div className="grid grid-cols-12 gap-4 p-6">
-      <div className="col-span-4 h-[248px]">
+    <div className="grid h-[calc(100vh-3.5rem)] grid-cols-12 grid-rows-[1.1fr_1.15fr_0.9fr] gap-4 p-6">
+      <div className="col-span-4 min-h-0">
         <UploadCard />
       </div>
-      <div className="col-span-4 h-[248px]">
+      <div className="col-span-4 min-h-0">
         <PlayerCard episode={data.currentEpisode} />
       </div>
-      <div className="col-span-4 h-[248px]">
+      <div className="col-span-4 min-h-0">
         <SummaryCard summary={data.summary} />
       </div>
-      <div className="col-span-7 h-[400px]">
+      <div className="col-span-7 min-h-0">
         <TranscriptCard segments={data.transcript} />
       </div>
-      <div className="col-span-5 h-[400px]">
+      <div className="col-span-5 min-h-0">
         <ChaptersCard chapters={data.chapters} />
       </div>
-      <div className="col-span-7 h-[190px]">
+      <div className="col-span-7 min-h-0">
         <RecentProjectsCard projects={data.recentProjects} />
       </div>
-      <div className="col-span-5 h-[190px]">
+      <div className="col-span-5 min-h-0">
         <ExportCard />
       </div>
     </div>
