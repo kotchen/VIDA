@@ -10,7 +10,7 @@ export function ChaptersCard({ chapters }: { chapters: Chapter[] }) {
     <Card className="card-glow flex h-full flex-col gap-3 rounded-2xl border-warm/60 bg-card p-4">
       <div className="flex items-center justify-between gap-2">
         <h2 className="text-base font-semibold text-gold">Chapters &amp; Highlights</h2>
-        <Button size="sm" className="bg-copper-gradient text-[#1A0E04] hover:opacity-90">
+        <Button size="sm" className="bg-copper-gradient text-on-copper hover:opacity-90">
           <Plus className="size-4" />
           Add Chapter
         </Button>

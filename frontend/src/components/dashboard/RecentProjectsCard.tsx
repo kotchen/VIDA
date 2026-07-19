@@ -1,4 +1,5 @@
 import { MoreVertical } from "lucide-react"
+import { Link } from "react-router"
 import { Badge } from "@/components/ui/badge"
 import { Card } from "@/components/ui/card"
 import type { Project } from "@/data/types"
@@ -9,7 +10,7 @@ export function RecentProjectsCard({ projects }: { projects: Project[] }) {
     <Card className="card-glow flex h-full flex-col gap-3 rounded-2xl border-warm/60 bg-card p-4">
       <div className="flex items-center justify-between">
         <h2 className="text-base font-semibold text-gold">Recent Projects</h2>
-        <button className="text-xs text-copper-300 transition-colors hover:text-copper-500">View all</button>
+        <Link to="/library" className="text-xs text-copper-300 transition-colors hover:text-copper-500">View all</Link>
       </div>
       <div className="grid min-h-0 flex-1 grid-cols-4 gap-3">
         {projects.map((p) => (
@@ -23,6 +24,8 @@ export function RecentProjectsCard({ projects }: { projects: Project[] }) {
               <div className="mt-auto flex items-center justify-between pt-1">
                 {p.status === "completed" ? (
                   <Badge className="border-success/40 bg-success/15 px-1.5 py-0 text-[10px] text-success">Completed</Badge>
+                ) : p.status === "failed" ? (
+                  <Badge variant="destructive" className="px-1.5 py-0 text-[10px]">Failed</Badge>
                 ) : (
                   <Badge className="border-copper-500/40 bg-copper-500/15 px-1.5 py-0 text-[10px] text-copper-300">Processing</Badge>
                 )}

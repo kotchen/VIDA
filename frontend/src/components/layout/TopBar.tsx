@@ -6,6 +6,8 @@ export function TopBar() {
       <div className="flex w-full max-w-xl items-center gap-2 rounded-xl border border-warm/60 bg-card px-4 py-2 text-muted-warm">
         <Search className="size-4 shrink-0" />
         <input
+          type="search"
+          aria-label="Search projects"
           className="w-full bg-transparent text-sm text-cream outline-none placeholder:text-muted-warm"
           placeholder="Search projects, transcripts, summaries..."
         />

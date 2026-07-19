@@ -13,6 +13,8 @@ export function TranscriptCard({ segments }: { segments: TranscriptSegment[] }) 
           <div className="flex items-center gap-2 rounded-lg border border-warm/60 bg-raised px-3 py-1.5 text-muted-warm">
             <Search className="size-3.5" />
             <input
+              type="search"
+              aria-label="Search transcript"
               className="w-32 bg-transparent text-xs text-cream outline-none placeholder:text-muted-warm"
               placeholder="Search transcript..."
             />

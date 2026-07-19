@@ -23,10 +23,10 @@ export function PlayerCard({ episode }: { episode: Episode }) {
         ) : null}
       </div>
       <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl">
-        <img src={episode.posterUrl} alt={episode.title} className="absolute inset-0 size-full object-cover" />
+        <img src={episode.posterUrl} alt="" className="absolute inset-0 size-full object-cover" />
         <button
           aria-label="Play"
-          className="bg-copper-gradient absolute left-1/2 top-1/2 flex size-12 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full text-[#1A0E04] shadow-lg"
+          className="bg-copper-gradient absolute left-1/2 top-1/2 flex size-12 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full text-on-copper shadow-lg"
         >
           <Play className="size-5 fill-current" />
         </button>

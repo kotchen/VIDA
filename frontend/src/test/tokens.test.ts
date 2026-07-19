@@ -17,6 +17,7 @@ describe("design tokens", () => {
     "--color-cream: #F3E9DA",
     "--color-muted-warm: #A68B70",
     "--color-success: #7BA05B",
+    "--color-on-copper: #1A0E04",
   ])("defines %s", (token) => {
     expect(css).toContain(token)
   })

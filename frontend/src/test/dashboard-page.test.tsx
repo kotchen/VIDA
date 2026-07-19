@@ -1,9 +1,14 @@
 import { render, screen } from "@testing-library/react"
+import { MemoryRouter } from "react-router"
 import { DashboardPage } from "../pages/DashboardPage"
 
 describe("DashboardPage", () => {
   it("loads provider data and renders all seven panels", async () => {
-    render(<DashboardPage />)
+    render(
+      <MemoryRouter>
+        <DashboardPage />
+      </MemoryRouter>
+    )
     // Episode title appears in both PlayerCard and RecentProjectsCard, so use findAllByText
     expect((await screen.findAllByText("AI Podcast Episode 12")).length).toBeGreaterThan(0)
     expect(screen.getByText("Upload a video or audio file")).toBeInTheDocument()

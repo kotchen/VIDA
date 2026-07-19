@@ -1,32 +1,18 @@
-# React + TypeScript + Vite
+# VIDA 2.0 Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Video Intelligence, Dialogue, Analysis — the VIDA 2.0 web frontend.
 
-Currently, two official plugins are available:
+**Stack:** React 19 + TypeScript + Vite + Tailwind CSS v4 (CSS-first theming) + shadcn/ui (new-york).
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Commands
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm install     # install dependencies
+npm run dev     # start dev server → http://localhost:7100
+npm test        # run tests (vitest)
+npm run build   # production build
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+## Notes
+
+All data is currently mocked via a MockProvider pending the v2 API. See the API contract at `docs/api/v2-api-contract.md` (repo root).

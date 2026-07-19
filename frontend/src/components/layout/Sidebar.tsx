@@ -27,7 +27,7 @@ export function Sidebar() {
             className={({ isActive }) =>
               `flex items-center gap-3 rounded-xl px-4 py-2.5 text-sm transition-colors ${
                 isActive
-                  ? "bg-copper-gradient font-semibold text-[#1A0E04]"
+                  ? "bg-copper-gradient font-semibold text-on-copper"
                   : "text-muted-warm hover:bg-raised hover:text-cream"
               }`
             }

@@ -18,6 +18,7 @@ export function ExportCard() {
         {FORMATS.map(({ icon: Icon, name, ext }) => (
           <button
             key={name}
+            type="button"
             className="flex flex-col items-center justify-center gap-1.5 rounded-xl border border-warm/60 bg-raised transition-colors hover:border-copper-500/60"
           >
             <Icon className="size-6 text-copper-300" strokeWidth={1.5} />

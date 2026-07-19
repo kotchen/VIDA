@@ -13,6 +13,7 @@ export default function App() {
         <Route path="/library" element={<PlaceholderPage title="Library" />} />
         <Route path="/summaries" element={<PlaceholderPage title="Summaries" />} />
         <Route path="/settings" element={<PlaceholderPage title="Settings" />} />
+        <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Route>
     </Routes>
   )

@@ -1,10 +1,15 @@
 import { render, screen } from "@testing-library/react"
+import { MemoryRouter } from "react-router"
 import { RecentProjectsCard } from "../components/dashboard/RecentProjectsCard"
 import { mockDashboard } from "../data/mock"
 
 describe("RecentProjectsCard", () => {
   it("renders four project cards with status badges", () => {
-    render(<RecentProjectsCard projects={mockDashboard.recentProjects} />)
+    render(
+      <MemoryRouter>
+        <RecentProjectsCard projects={mockDashboard.recentProjects} />
+      </MemoryRouter>
+    )
     expect(screen.getByText("Recent Projects")).toBeInTheDocument()
     expect(screen.getByText("View all")).toBeInTheDocument()
     expect(screen.getByText("Product Launch Talk")).toBeInTheDocument()
