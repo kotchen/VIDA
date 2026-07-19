@@ -331,6 +331,19 @@ class JobRepositoryTests(unittest.TestCase):
         repeated = self.repo.request_cancel("j1", "2026-07-18T00:03:00Z")
         self.assertEqual(repeated.cancel_requested_at, "2026-07-18T00:02:00Z")
 
+    def test_stale_episode_cancel_cannot_cancel_replacement_attempt(self):
+        self._episode("e1")
+        self.repo.enqueue(self._job("e1", "j1"))
+        self.repo.request_cancel_current("e1", "j1", "2026-07-18T00:01:00Z")
+        self.repo.enqueue(self._job("e1", "j2", attempt=2))
+
+        with self.assertRaises(InvalidJobState):
+            self.repo.request_cancel_current("e1", "j1", "2026-07-18T00:02:00Z")
+
+        self.assertEqual(self.repo.get_required("j1").status, "canceled")
+        self.assertEqual(self.repo.get_required("j2").status, "queued")
+        self.assertEqual(self._episode_row("e1")["current_job_id"], "j2")
+
     def test_terminal_transitions_update_job_and_owning_episode(self):
         cases = (
             ("completed", lambda: self.repo.complete("j1", "2026-07-18T00:03:00Z"),

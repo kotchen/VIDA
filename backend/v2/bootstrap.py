@@ -82,7 +82,7 @@ def _build_runtime(
     episode_repository = EpisodeRepository(database)
     chapter_repository = ChapterRepository(database)
     episode_service = EpisodeService(
-        episode_repository, job_repository, database, settings.data_dir
+        episode_repository, job_repository, database, settings.data_dir, chapter_repository
     )
     media_service = MediaService(settings.data_dir, [episode_repository])
     if executor is None:

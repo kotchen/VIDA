@@ -204,6 +204,70 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.episodes.get_summary("episode-1").generated_by, "VIDA")
         self.assertEqual([row.title for row in self.chapters.list("episode-1")], ["Opening"])
 
+    async def test_summary_regeneration_reuses_transcript_and_replaces_only_summary(self):
+        pipeline, _ = self.make_pipeline(AI())
+        await pipeline.execute(self.job, lambda: False)
+        original_chapters = self.chapters.list("episode-1")
+        job = JobRecord(
+            "regen-summary", "episode-1", "regenerate_summary", 2, "queued",
+            self.credentials.id, NOW, None, None, None, None, None, 0, "Queued", None, None,
+        )
+        self.jobs.enqueue(job)
+        claimed = self.jobs.claim_next("worker-2", NOW)
+        source = self.make_pipeline(AI())[0]._source
+        async def forbidden(*args, **kwargs):
+            raise AssertionError("regeneration must not ingest or transcribe media")
+        source.prepare = forbidden
+        regen, _ = self.make_pipeline(AI(), transcriber=SimpleNamespace(transcribe_segments=forbidden))
+        regen._source = source
+
+        await regen.execute(claimed, lambda: False)
+
+        self.assertEqual(self.jobs.get_required(job.id).status, "completed")
+        self.assertEqual(self.episodes.get_summary("episode-1").content, "Summary")
+        self.assertEqual(self.chapters.list("episode-1"), original_chapters)
+        self.assertEqual(self.episodes.get("episode-1").status, "completed")
+
+    async def test_chapter_regeneration_preserves_summary_and_manual_chapters(self):
+        pipeline, _ = self.make_pipeline(AI())
+        await pipeline.execute(self.job, lambda: False)
+        summary = self.episodes.get_summary("episode-1")
+        manual = self.chapters.create_manual("episode-1", 12, "Manual", 2, None, True)
+        job = JobRecord(
+            "regen-chapters", "episode-1", "regenerate_chapters", 2, "queued",
+            self.credentials.id, NOW, None, None, None, None, None, 0, "Queued", None, None,
+        )
+        self.jobs.enqueue(job)
+        claimed = self.jobs.claim_next("worker-2", NOW)
+        regen, _ = self.make_pipeline(AI())
+
+        await regen.execute(claimed, lambda: False)
+
+        self.assertEqual(self.episodes.get_summary("episode-1"), summary)
+        self.assertIn(manual, self.chapters.list("episode-1"))
+        self.assertEqual(self.jobs.get_required(job.id).status, "completed")
+
+    async def test_failed_regeneration_retains_old_content_and_only_job_fails(self):
+        pipeline, _ = self.make_pipeline(AI())
+        await pipeline.execute(self.job, lambda: False)
+        old_summary = self.episodes.get_summary("episode-1")
+        job = JobRecord(
+            "regen-fails", "episode-1", "regenerate_summary", 2, "queued",
+            self.credentials.id, NOW, None, None, None, None, None, 0, "Queued", None, None,
+        )
+        self.jobs.enqueue(job)
+        claimed = self.jobs.claim_next("worker-2", NOW)
+        regen, _ = self.make_pipeline(AI(summary_error=RuntimeError("provider secret")))
+        scheduler = Scheduler(self.jobs, regen, max_workers=1, poll_interval_sec=0.01)
+
+        await scheduler._execute(claimed)
+
+        self.assertEqual(self.episodes.get_summary("episode-1"), old_summary)
+        self.assertEqual(self.episodes.get("episode-1").status, "completed")
+        failed = self.jobs.get_required(job.id)
+        self.assertEqual((failed.status, failed.error_code), ("failed", "job_execution_failed"))
+        self.assertNotIn("secret", failed.error_message)
+
     async def test_cancel_immediately_after_core_commit_keeps_new_references(self):
         self._seed_old_media()
         canceled = False

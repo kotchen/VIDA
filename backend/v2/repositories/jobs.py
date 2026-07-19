@@ -130,6 +130,48 @@ class JobRepository:
                 raise InvalidJobState(job_id, row["status"])
             return _job_from_row(_require_job(conn, job_id))
 
+    def request_cancel_current(
+        self, episode_id: str, expected_job_id: str, now: str
+    ) -> JobRecord:
+        """Cancel only while the supplied Job still owns Episode.current_job_id."""
+        with self._database.transaction(immediate=True) as conn:
+            episode = conn.execute(
+                "SELECT current_job_id FROM episodes WHERE id=?", (episode_id,)
+            ).fetchone()
+            if episode is None:
+                raise KeyError(episode_id)
+            if episode["current_job_id"] != expected_job_id:
+                raise InvalidJobState(expected_job_id, "not_current")
+            row = _require_job(conn, expected_job_id)
+            if row["status"] == "canceled":
+                return _job_from_row(row)
+            _require_episode_ownership(conn, row)
+            if row["status"] == "queued":
+                conn.execute(
+                    "UPDATE jobs SET status='canceled',cancel_requested_at=?,finished_at=?,"
+                    "message='Canceled' WHERE id=? AND status='queued'",
+                    (now, now, expected_job_id),
+                )
+                conn.execute(
+                    "UPDATE episodes SET status='canceled',message='Canceled',completed_at=?,"
+                    "updated_at=? WHERE id=? AND current_job_id=?",
+                    (now, now, episode_id, expected_job_id),
+                )
+            elif row["status"] == "processing":
+                if row["cancel_requested_at"] is None:
+                    conn.execute(
+                        "UPDATE jobs SET cancel_requested_at=?,message='Canceling' WHERE id=?",
+                        (now, expected_job_id),
+                    )
+                    conn.execute(
+                        "UPDATE episodes SET message='Canceling',updated_at=? "
+                        "WHERE id=? AND current_job_id=?",
+                        (now, episode_id, expected_job_id),
+                    )
+            else:
+                raise InvalidJobState(expected_job_id, row["status"])
+            return _job_from_row(_require_job(conn, expected_job_id))
+
     def complete(self, job_id: str, now: str) -> JobRecord:
         return self._finish(
             job_id, "completed", now, progress=100, message="Completed"

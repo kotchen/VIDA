@@ -143,3 +143,57 @@ class EpisodeSubmissionResponse(ApiModel):
     queue_position: int | None
     provider_profile_id: str
     warnings: list[dict[str, str]]
+
+
+class ProcessingWarningResponse(ApiModel):
+    stage: str
+    code: str
+    message: str
+
+
+class EpisodeResponse(EpisodeSubmissionResponse):
+    warnings: list[ProcessingWarningResponse]
+
+
+class TranscriptSegmentResponse(ApiModel):
+    id: str
+    start_sec: float
+    end_sec: float
+    speaker: str
+    text: str
+
+
+class SummaryResponse(ApiModel):
+    episode_id: str
+    content: str
+    read_time_min: int
+    key_points: int
+    confidence: int
+    generated_by: str
+
+
+class ChapterResponse(ApiModel):
+    id: str
+    start_sec: float
+    title: str
+    duration_sec: float
+    thumbnail_url: str | None
+    bookmarked: bool
+
+
+class JobResponse(ApiModel):
+    id: str
+    episode_id: str
+    type: str
+    attempt: int
+    status: str
+    provider_profile_revision_id: str
+    submitted_at: str
+    started_at: str | None
+    finished_at: str | None
+    cancel_requested_at: str | None
+    progress: int
+    message: str
+    queue_position: int | None
+    error_code: str | None
+    error_message: str | None

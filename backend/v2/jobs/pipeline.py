@@ -45,6 +45,9 @@ class EpisodePipeline:
         self._now = now
 
     async def execute(self, job: JobRecord, cancel_check) -> None:
+        if job.type in {"regenerate_summary", "regenerate_chapters"}:
+            await self._execute_regeneration(job, cancel_check)
+            return
         if job.type != "process_episode":
             raise RuntimeError("Unsupported job type")
         self._check_cancel(cancel_check)
@@ -182,6 +185,62 @@ class EpisodePipeline:
             job, 95, "Finalizing", cancel_check,
             run_owned_to_thread(self._episodes.set_warnings, episode.id, warnings),
         )
+        self._check_cancel(cancel_check)
+        try:
+            await run_owned_to_thread(self._jobs.complete, job.id, self._now())
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise PipelinePersistenceError("Pipeline persistence failed") from None
+
+    async def _execute_regeneration(self, job: JobRecord, cancel_check) -> None:
+        self._check_cancel(cancel_check)
+        episode = await run_owned_to_thread(self._episodes.get, job.episode_id)
+        if episode is None or episode.status != "completed":
+            raise RuntimeError("Completed episode is unavailable")
+        segments = await run_owned_to_thread(
+            self._episodes.get_transcript, episode.id
+        )
+        if not segments:
+            raise RuntimeError("Episode transcript is unavailable")
+        credentials = await run_owned_to_thread(
+            self._profiles.get_revision_credentials,
+            job.provider_profile_revision_id,
+        )
+        ai = self._ai_factory(credentials)
+        transcript = "\n".join(row.text for row in segments)
+        optimized = await self._stage(
+            job, 20, "Optimizing transcript", cancel_check, ai.optimize(transcript)
+        )
+        if job.type == "regenerate_summary":
+            summary = await self._stage(
+                job, 60, "Generating summary", cancel_check,
+                ai.summarize(
+                    episode.id, optimized, episode.summary_language, episode.title
+                ),
+            )
+            await self._stage(
+                job, 90, "Saving summary", cancel_check,
+                run_owned_to_thread(
+                    self._episodes.replace_summary, episode.id, summary
+                ),
+            )
+        else:
+            generated = await self._stage(
+                job, 60, "Generating chapters", cancel_check,
+                ai.generate_chapters(
+                    episode.id,
+                    optimized,
+                    episode.duration_sec or 0,
+                    episode.poster_path,
+                ),
+            )
+            await self._stage(
+                job, 90, "Saving chapters", cancel_check,
+                run_owned_to_thread(
+                    self._chapters.replace_generated, episode.id, generated
+                ),
+            )
         self._check_cancel(cancel_check)
         try:
             await run_owned_to_thread(self._jobs.complete, job.id, self._now())

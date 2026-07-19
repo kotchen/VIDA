@@ -16,10 +16,14 @@ from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import parse_options_header
 
 from ..database import Database
-from ..domain import EpisodeRecord, JobRecord, SummaryRecord, TranscriptSegmentRecord
+from ..domain import (
+    ChapterRecord, EpisodeRecord, InvalidJobState, JobRecord, SummaryRecord,
+    TranscriptSegmentRecord,
+)
 from ..errors import V2Error
 from ..repositories.episodes import EpisodeRepository
 from ..repositories.jobs import JobRepository
+from ..repositories.chapters import ChapterRepository
 
 
 UPLOAD_CHUNK_BYTES = 1024 * 1024
@@ -76,11 +80,13 @@ class EpisodeService:
         jobs: JobRepository | None = None,
         database: Database | None = None,
         data_dir: Path | None = None,
+        chapters: ChapterRepository | None = None,
     ):
         self._repository = repository
         self._jobs = jobs
         self._database = database
         self._data_dir = None if data_dir is None else Path(data_dir)
+        self._chapters = chapters
 
     def get_episode(self, episode_id: str) -> EpisodeRecord:
         episode = self._repository.get(episode_id)
@@ -101,6 +107,119 @@ class EpisodeService:
         if summary is None:
             raise V2Error("summary_not_found", "Episode summary not found", 404, {})
         return summary
+
+    def get_chapters(self, episode_id: str) -> list[ChapterRecord]:
+        self.get_episode(episode_id)
+        if self._chapters is None:
+            raise RuntimeError("chapter repository is not configured")
+        return self._chapters.list(episode_id)
+
+    def get_job(self, job_id: str) -> JobRecord:
+        self._require_control_dependencies()
+        job = self._jobs.get(job_id)
+        if job is None:
+            raise V2Error("job_not_found", "Job not found", 404, {})
+        return job
+
+    def cancel_job(self, job_id: str) -> JobRecord:
+        self._require_control_dependencies()
+        try:
+            return self._jobs.request_cancel(job_id, _utc_now())
+        except KeyError:
+            raise V2Error("job_not_found", "Job not found", 404, {}) from None
+        except InvalidJobState:
+            raise V2Error("invalid_job_state", "Job cannot be canceled", 409, {}) from None
+
+    def cancel_episode(self, episode_id: str) -> JobRecord:
+        self._require_control_dependencies()
+        episode = self.get_episode(episode_id)
+        if episode.current_job_id is None:
+            raise V2Error(
+                "invalid_episode_state", "Episode has no current job", 409, {}
+            )
+        try:
+            return self._jobs.request_cancel_current(
+                episode_id, episode.current_job_id, _utc_now()
+            )
+        except InvalidJobState:
+            raise V2Error(
+                "invalid_episode_state", "Episode cannot be canceled", 409, {}
+            ) from None
+
+    def retry(self, episode_id: str) -> JobRecord:
+        return self._enqueue_control(episode_id, "process_episode", {"failed", "canceled"})
+
+    def regenerate(self, episode_id: str, job_type: str) -> JobRecord:
+        if job_type not in {"regenerate_summary", "regenerate_chapters"}:
+            raise ValueError("invalid regeneration job type")
+        return self._enqueue_control(episode_id, job_type, {"completed"})
+
+    def queue_position(self, job_id: str) -> int | None:
+        self._require_control_dependencies()
+        return self._jobs.queue_position(job_id)
+
+    def _enqueue_control(
+        self, episode_id: str, job_type: str, allowed_states: set[str]
+    ) -> JobRecord:
+        self._require_control_dependencies()
+        now = _utc_now()
+        job_id = str(uuid4())
+        with self._database.transaction(immediate=True) as conn:
+            episode = conn.execute(
+                "SELECT status,provider_profile_id FROM episodes WHERE id=?",
+                (episode_id,),
+            ).fetchone()
+            if episode is None:
+                raise _episode_not_found()
+            if episode["status"] not in allowed_states:
+                raise V2Error(
+                    "invalid_episode_state", "Episode cannot enter this operation", 409, {}
+                )
+            active = conn.execute(
+                "SELECT 1 FROM jobs WHERE episode_id=? AND status IN ('queued','processing')",
+                (episode_id,),
+            ).fetchone()
+            if active is not None:
+                raise V2Error("job_already_active", "Episode already has an active job", 409, {})
+            profile = conn.execute(
+                "SELECT active_revision_id FROM provider_profiles "
+                "WHERE id=? AND deleted_at IS NULL AND active_revision_id IS NOT NULL",
+                (episode["provider_profile_id"],),
+            ).fetchone()
+            if profile is None:
+                raise V2Error(
+                    "provider_profile_inactive", "Provider profile is missing or inactive", 422, {}
+                )
+            attempt = conn.execute(
+                "SELECT COALESCE(MAX(attempt),0)+1 FROM jobs WHERE episode_id=?",
+                (episode_id,),
+            ).fetchone()[0]
+            job = JobRecord(
+                job_id, episode_id, job_type, attempt, "queued",
+                profile["active_revision_id"], now, None, None, None, None, None,
+                0, "Queued", None, None,
+            )
+            conn.execute(
+                "INSERT INTO jobs(id,episode_id,type,attempt,status,"
+                "provider_profile_revision_id,submitted_at,started_at,finished_at,"
+                "cancel_requested_at,heartbeat_at,worker_id,progress,message,error_code,"
+                "error_message) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                tuple(getattr(job, field) for field in _JOB_FIELDS),
+            )
+            if job_type == "process_episode":
+                changed = conn.execute(
+                    "UPDATE episodes SET current_job_id=?,status='queued',progress=0,"
+                    "message='Queued',warnings_json='[]',error_code=NULL,error_message=NULL,"
+                    "completed_at=NULL,updated_at=? WHERE id=? AND status IN ('failed','canceled')",
+                    (job_id, now, episode_id),
+                ).rowcount
+                if changed != 1:
+                    raise V2Error("invalid_episode_state", "Episode cannot be retried", 409, {})
+        return job
+
+    def _require_control_dependencies(self) -> None:
+        if self._database is None or self._jobs is None:
+            raise RuntimeError("episode control service is not configured")
 
     async def submit_upload(
         self,
