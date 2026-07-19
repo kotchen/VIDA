@@ -199,11 +199,19 @@ class EpisodePipeline:
         )
         committed: list[Path] = []
         try:
-            await asyncio.to_thread(self._media.commit_file, media_staged, final_media)
+            canceled, _ = await _owned_to_thread(
+                self._media.commit_file, media_staged, final_media
+            )
             committed.append(final_media)
+            if canceled:
+                raise asyncio.CancelledError
             self._check_cancel(cancel_check)
-            await asyncio.to_thread(self._media.commit_file, poster_staged, final_poster)
+            canceled, _ = await _owned_to_thread(
+                self._media.commit_file, poster_staged, final_poster
+            )
             committed.append(final_poster)
+            if canceled:
+                raise asyncio.CancelledError
             self._check_cancel(cancel_check)
         except BaseException:
             await self._unlink_paths(committed)
@@ -275,7 +283,9 @@ class EpisodePipeline:
                 if resolved.is_file():
                     resolved.unlink(missing_ok=True)
 
-        await asyncio.to_thread(remove)
+        canceled, _ = await _owned_to_thread(remove)
+        if canceled:
+            raise asyncio.CancelledError
 
     async def _stage(
         self, job, progress: int, message: str, cancel_check, awaitable
@@ -356,3 +366,21 @@ def _consume_current_cancellation() -> None:
     current = asyncio.current_task()
     if current is not None:
         current.uncancel()
+
+
+async def _owned_to_thread(function, *args):
+    operation = asyncio.create_task(asyncio.to_thread(function, *args))
+    canceled = False
+    while not operation.done():
+        try:
+            await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            canceled = True
+            _consume_current_cancellation()
+    try:
+        result = operation.result()
+    except BaseException:
+        if canceled:
+            raise asyncio.CancelledError from None
+        raise
+    return canceled, result

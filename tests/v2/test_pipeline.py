@@ -14,6 +14,7 @@ from backend.v2.domain import (
     ChapterRecord, EpisodeRecord, JobRecord, SummaryRecord,
 )
 from backend.v2.jobs.models import JobCanceled, TranscriptionFailed
+from backend.v2.jobs.ai import AIProcessor
 from backend.v2.jobs.pipeline import EpisodePipeline
 from backend.v2.jobs.scheduler import Scheduler
 from backend.v2.jobs.source_ingest import PreparedSource
@@ -128,7 +129,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.job = self.jobs.claim_next("worker-1", NOW)
 
     def make_pipeline(
-        self, ai, *, transcriber=None, heartbeat=5.0, episodes=None, chapters=None
+        self, ai, *, transcriber=None, heartbeat=5.0, episodes=None, chapters=None,
+        media=None,
     ):
         captured = []
 
@@ -142,7 +144,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             episodes=episodes or self.episodes,
             chapters=chapters or self.chapters,
             jobs=self.jobs,
-            media=Media(),
+            media=media or Media(),
             source=Source(),
             transcriber=transcriber or Transcriber(),
             ai_factory=ai_factory,
@@ -254,6 +256,44 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((self.data / episode.media_path).is_file())
         self.assertTrue((self.data / episode.poster_path).is_file())
 
+    async def test_repeated_cancel_during_file_commit_joins_and_removes_orphans(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingMedia(Media):
+            def __init__(self):
+                self.calls = 0
+                self.destinations = []
+
+            def commit_file(inner_self, staged, final):
+                inner_self.calls += 1
+                inner_self.destinations.append(final)
+                super(BlockingMedia, inner_self).commit_file(staged, final)
+                if inner_self.calls == 2:
+                    started.set()
+                    release.wait(timeout=2)
+
+        media = BlockingMedia()
+        pipeline, _ = self.make_pipeline(AI(), media=media)
+        task = asyncio.create_task(pipeline.execute(self.job, lambda: False))
+        self.assertTrue(await asyncio.to_thread(started.wait, 1))
+        task.cancel()
+        await asyncio.sleep(0.02)
+        self.assertFalse(task.done())
+        task.cancel()
+        await asyncio.sleep(0.02)
+        self.assertFalse(task.done())
+        release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(len(media.destinations), 2)
+        self.assertTrue(all(not path.exists() for path in media.destinations))
+        self.assertFalse(
+            (self.data / "episodes" / "episode-1" / "attempts" / "job-1").exists()
+        )
+        self.assertIsNone(self.episodes.get("episode-1").media_path)
+
     async def test_summary_write_failure_warns_and_preserves_previous_summary(self):
         old = SummaryRecord("episode-1", "Old summary", 1, 1, 80, "VIDA")
         self.episodes.replace_summary("episode-1", old)
@@ -285,6 +325,54 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.chapters.list("episode-1"), [old])
         self.assertEqual(self.jobs.get_required("job-1").status, "completed")
         self.assertEqual([w.stage for w in self.episodes.get("episode-1").warnings], ["chapters"])
+
+    async def test_malformed_chapters_warn_and_preserve_previous_generated(self):
+        old = ChapterRecord(
+            "old-chapter", "episode-1", 0, "Old chapter", 30, None, False, "generated"
+        )
+        self.chapters.replace_generated("episode-1", [old])
+
+        class Runner:
+            async def complete(inner_self, credentials, messages, response_format):
+                return "not-json"
+
+        processor = AIProcessor(self.credentials, runner=Runner())
+
+        class MalformedChapterAI(AI):
+            async def generate_chapters(inner_self, episode_id, transcript, duration, poster):
+                return await processor.generate_chapters(
+                    episode_id, transcript, duration, poster
+                )
+
+        pipeline, _ = self.make_pipeline(MalformedChapterAI())
+        await pipeline.execute(self.job, lambda: False)
+
+        self.assertEqual(self.chapters.list("episode-1"), [old])
+        self.assertEqual([w.stage for w in self.episodes.get("episode-1").warnings], ["chapters"])
+
+    async def test_explicit_empty_chapters_replace_previous_generated(self):
+        old = ChapterRecord(
+            "old-chapter", "episode-1", 0, "Old chapter", 30, None, False, "generated"
+        )
+        self.chapters.replace_generated("episode-1", [old])
+
+        class Runner:
+            async def complete(inner_self, credentials, messages, response_format):
+                return '{"chapters": []}'
+
+        processor = AIProcessor(self.credentials, runner=Runner())
+
+        class EmptyChapterAI(AI):
+            async def generate_chapters(inner_self, episode_id, transcript, duration, poster):
+                return await processor.generate_chapters(
+                    episode_id, transcript, duration, poster
+                )
+
+        pipeline, _ = self.make_pipeline(EmptyChapterAI())
+        await pipeline.execute(self.job, lambda: False)
+
+        self.assertEqual(self.chapters.list("episode-1"), [])
+        self.assertEqual(self.episodes.get("episode-1").warnings, [])
 
     async def test_transcription_failure_is_a_core_pipeline_error(self):
         pipeline, _ = self.make_pipeline(

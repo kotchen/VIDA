@@ -226,7 +226,7 @@ class AIProcessor:
                 starts.append(start)
                 titles.append(title)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            return []
+            raise AIExecutionError("Chapter output is invalid") from None
         return [
             ChapterRecord(
                 id=str(uuid4()),

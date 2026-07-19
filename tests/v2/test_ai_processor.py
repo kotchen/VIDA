@@ -146,8 +146,10 @@ class AIProcessorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(row.source == "generated" for row in chapters))
         self.assertTrue(all(not row.bookmarked for row in chapters))
 
-    async def test_invalid_chapters_return_no_rows(self):
-        invalid_documents = [
+    async def test_invalid_chapters_raise_sanitized_error(self):
+        invalid_payloads = [
+            "not-json",
+            json.dumps({"wrong": []}),
             {"chapters": [{"startSec": -1, "title": "Bad"}]},
             {"chapters": [
                 {"startSec": 5, "title": "Later"},
@@ -155,12 +157,23 @@ class AIProcessorTests(unittest.IsolatedAsyncioTestCase):
             ]},
             {"chapters": [{"startSec": 31, "title": "Past end"}]},
         ]
-        for document in invalid_documents:
-            with self.subTest(document=document):
-                rows = await AIProcessor(
-                    CREDENTIALS, runner=RecordingRunner([json.dumps(document)])
-                ).generate_chapters("episode-1", "text", 30.0, None)
-                self.assertEqual(rows, [])
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                if not isinstance(payload, str):
+                    payload = json.dumps(payload)
+                with self.assertRaisesRegex(
+                    AIExecutionError, "Chapter output is invalid"
+                ) as caught:
+                    await AIProcessor(
+                        CREDENTIALS, runner=RecordingRunner([payload])
+                    ).generate_chapters("episode-1", "text", 30.0, None)
+                self.assertNotIn(payload, str(caught.exception))
+
+    async def test_explicit_empty_chapters_are_valid(self):
+        rows = await AIProcessor(
+            CREDENTIALS, runner=RecordingRunner(['{"chapters": []}'])
+        ).generate_chapters("episode-1", "text", 30.0, None)
+        self.assertEqual(rows, [])
 
     async def test_provider_errors_and_timeouts_are_sanitized(self):
         for failure in (RuntimeError("secret-key upstream exploded"), asyncio.TimeoutError()):

@@ -1,5 +1,6 @@
 import types
 import unittest
+from decimal import Decimal
 from unittest.mock import patch
 
 from backend.transcriber import StructuredTranscription, Transcriber
@@ -56,6 +57,24 @@ class StructuredTranscriberTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(result.segments), 1)
+
+    async def test_rejects_coercible_and_nonfinite_whisper_timestamps(self):
+        invalid = [
+            (True, 1.0),
+            ("0", 1.0),
+            (Decimal("0"), 1.0),
+            (float("nan"), 1.0),
+            (0.0, float("inf")),
+        ]
+        for start, end in invalid:
+            with self.subTest(start=start, end=end):
+                transcriber = Transcriber()
+                transcriber.model = FakeModel(
+                    [types.SimpleNamespace(start=start, end=end, text="text")]
+                )
+                with patch("backend.transcriber.os.path.exists", return_value=True):
+                    with self.assertRaisesRegex(Exception, "Transcription failed"):
+                        await transcriber.transcribe_segments("audio.wav")
 
 
 if __name__ == "__main__":

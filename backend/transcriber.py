@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 from dataclasses import dataclass
 from typing import Optional
@@ -120,7 +121,9 @@ class Transcriber:
             )
             rows = tuple(
                 TranscriptSegment(
-                    float(segment.start), float(segment.end), segment.text.strip()
+                    _strict_timestamp(segment.start),
+                    _strict_timestamp(segment.end),
+                    segment.text.strip(),
                 )
                 for segment in segments
             )
@@ -159,3 +162,9 @@ class Transcriber:
                     language = line.split(":")[-1].strip()
                     return language or None
         return None
+
+
+def _strict_timestamp(value) -> float:
+    if type(value) not in {int, float} or not math.isfinite(float(value)):
+        raise ValueError("invalid transcript timestamp")
+    return float(value)
