@@ -31,6 +31,7 @@ class Scheduler:
         self._idle = asyncio.Event()
         self._claim_lock = asyncio.Lock()
         self._start_condition = asyncio.Condition()
+        self._lifecycle_lock = asyncio.Lock()
         self._claimed_sequence = 0
         self._next_start_sequence = 0
         self._waiting_workers: set[int] = set()
@@ -46,21 +47,22 @@ class Scheduler:
         return self._max_workers
 
     async def start(self) -> None:
-        if self._workers:
-            return
-        await asyncio.to_thread(
-            self._jobs.recover_interrupted, "Service restarted; job requeued"
-        )
-        self._accepting_claims = True
-        self._idle.clear()
-        self._waiting_workers.clear()
-        self._active_jobs = 0
-        self._claimed_sequence = 0
-        self._next_start_sequence = 0
-        self._workers = [
-            asyncio.create_task(self._worker(index), name=f"vida-v2-worker-{index}")
-            for index in range(self._max_workers)
-        ]
+        async with self._lifecycle_lock:
+            if self._workers:
+                return
+            await asyncio.to_thread(
+                self._jobs.recover_interrupted, "Service restarted; job requeued"
+            )
+            self._accepting_claims = True
+            self._idle.clear()
+            self._waiting_workers.clear()
+            self._active_jobs = 0
+            self._claimed_sequence = 0
+            self._next_start_sequence = 0
+            self._workers = [
+                asyncio.create_task(self._worker(index), name=f"vida-v2-worker-{index}")
+                for index in range(self._max_workers)
+            ]
 
     def notify(self) -> None:
         self._idle.clear()
@@ -70,17 +72,31 @@ class Scheduler:
         await asyncio.wait_for(self._idle.wait(), timeout=max(0, timeout_sec))
 
     async def stop(self, grace_period_sec: float) -> None:
-        if not self._workers:
-            return
-        self._accepting_claims = False
-        self._wakeup.set()
-        _, pending = await asyncio.wait(
-            self._workers, timeout=max(0, grace_period_sec)
-        )
+        async with self._lifecycle_lock:
+            if not self._workers:
+                return
+            self._accepting_claims = False
+            self._wakeup.set()
+            try:
+                _, pending = await asyncio.wait(
+                    self._workers, timeout=max(0, grace_period_sec)
+                )
+            except asyncio.CancelledError:
+                await self._cancel_and_join(self._workers)
+                self._clear_workers()
+                raise
+            await self._cancel_and_join(pending)
+            self._clear_workers()
+
+    @staticmethod
+    async def _cancel_and_join(workers) -> None:
+        pending = list(workers)
         for worker in pending:
             worker.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
+
+    def _clear_workers(self) -> None:
         self._workers.clear()
         self._waiting_workers.clear()
         self._active_jobs = 0

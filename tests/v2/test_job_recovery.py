@@ -2,6 +2,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi import FastAPI
 
@@ -23,6 +24,25 @@ class RecordingExecutor:
     async def execute(self, job, cancel_check):
         self.started_ids.append(job.id)
         self.cancel_checks.append(cancel_check())
+
+
+class CancellationBlockingExecutor:
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.restarted = asyncio.Event()
+        self.canceled = asyncio.Event()
+        self.started_count = 0
+
+    async def execute(self, job, cancel_check):
+        self.started_count += 1
+        self.started.set()
+        if self.started_count == 2:
+            self.restarted.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.canceled.set()
+            raise
 
 
 class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
@@ -67,6 +87,85 @@ class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
         await self.scheduler.stop(0.5)
         self.assertEqual(self.scheduler.worker_count, 0)
 
+    async def test_concurrent_start_recovers_once_and_creates_one_worker_pool(self):
+        executor = RecordingExecutor()
+        self.scheduler = Scheduler(self.jobs, executor, 2, 30)
+        real_to_thread = asyncio.to_thread
+        recovery_entered = asyncio.Event()
+        release_recovery = asyncio.Event()
+        recovery_calls = 0
+
+        async def controlled_to_thread(function, *args):
+            nonlocal recovery_calls
+            if function.__name__ == "recover_interrupted":
+                recovery_calls += 1
+                recovery_entered.set()
+                await release_recovery.wait()
+            if function.__name__ == "claim_next":
+                return None
+            return await real_to_thread(function, *args)
+
+        with patch("backend.v2.jobs.scheduler.asyncio.to_thread", controlled_to_thread):
+            starts = [asyncio.create_task(self.scheduler.start()) for _ in range(2)]
+            await asyncio.wait_for(recovery_entered.wait(), 1)
+            await asyncio.sleep(0)
+            release_recovery.set()
+            await asyncio.gather(*starts)
+            live_before_stop = self._live_scheduler_workers()
+            await self.scheduler.stop(0.5)
+            live_after_stop = self._live_scheduler_workers()
+
+        await self._cancel_tasks(live_after_stop)
+        self.assertEqual(recovery_calls, 1)
+        self.assertEqual(len(live_before_stop), 2)
+        self.assertEqual(live_after_stop, [])
+
+    async def test_stop_waits_for_in_progress_start_then_cleans_the_pool(self):
+        self.scheduler = Scheduler(self.jobs, RecordingExecutor(), 2, 30)
+        real_to_thread = asyncio.to_thread
+        recovery_entered = asyncio.Event()
+        release_recovery = asyncio.Event()
+
+        async def controlled_to_thread(function, *args):
+            if function.__name__ == "recover_interrupted":
+                recovery_entered.set()
+                await release_recovery.wait()
+            if function.__name__ == "claim_next":
+                return None
+            return await real_to_thread(function, *args)
+
+        with patch("backend.v2.jobs.scheduler.asyncio.to_thread", controlled_to_thread):
+            start = asyncio.create_task(self.scheduler.start())
+            await asyncio.wait_for(recovery_entered.wait(), 1)
+            stop = asyncio.create_task(self.scheduler.stop(0.5))
+            await asyncio.sleep(0)
+            release_recovery.set()
+            await asyncio.gather(start, stop)
+            leaked = self._live_scheduler_workers()
+
+        await self._cancel_tasks(leaked)
+        self.assertEqual(self.scheduler.worker_count, 0)
+        self.assertEqual(leaked, [])
+
+    async def test_canceled_stop_finishes_cleanup_and_allows_restart(self):
+        executor = CancellationBlockingExecutor()
+        self.scheduler = Scheduler(self.jobs, executor, 1, 30)
+        await self.scheduler.start()
+        await asyncio.wait_for(executor.started.wait(), 1)
+
+        stop = asyncio.create_task(self.scheduler.stop(30))
+        await asyncio.sleep(0)
+        stop.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await stop
+
+        await asyncio.wait_for(executor.canceled.wait(), 1)
+        self.assertEqual(self.scheduler.worker_count, 0)
+        self.assertEqual(self.jobs.get_required("j0").status, "processing")
+        await self.scheduler.start()
+        self.assertEqual(self.scheduler.worker_count, 1)
+        await asyncio.wait_for(executor.restarted.wait(), 1)
+
     async def test_runtime_uses_configured_workers_and_fastapi_lifespan(self):
         executor = RecordingExecutor()
         runtime = build_test_runtime(
@@ -106,6 +205,20 @@ class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
             JobRecord("j0", "e0", "process_episode", 1, "queued", "r1", NOW,
                       None, None, None, None, None, 0, "Queued", None, None)
         )
+
+    @staticmethod
+    def _live_scheduler_workers() -> list[asyncio.Task]:
+        return [
+            task for task in asyncio.all_tasks()
+            if task.get_name().startswith("vida-v2-worker-") and not task.done()
+        ]
+
+    @staticmethod
+    async def _cancel_tasks(tasks: list[asyncio.Task]) -> None:
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 if __name__ == "__main__":
