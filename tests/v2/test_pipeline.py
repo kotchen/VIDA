@@ -588,6 +588,15 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
     async def test_chapter_heartbeat_failure_is_terminal(self):
         await self._assert_optional_heartbeat_failure(85)
 
+    async def test_optimization_heartbeat_failure_wins_over_child_failure(self):
+        await self._assert_optional_heartbeat_failure(65, child_fails=True)
+
+    async def test_summary_heartbeat_failure_wins_over_child_failure(self):
+        await self._assert_optional_heartbeat_failure(72, child_fails=True)
+
+    async def test_chapter_heartbeat_failure_wins_over_child_failure(self):
+        await self._assert_optional_heartbeat_failure(85, child_fails=True)
+
     async def test_transcription_heartbeat_failure_stays_infrastructure_typed(self):
         gate = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -610,7 +619,34 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PipelinePersistenceError):
             await pipeline.execute(self.job, lambda: False)
 
-    async def _assert_optional_heartbeat_failure(self, target):
+    async def test_transcription_heartbeat_failure_wins_over_child_failure(self):
+        gate = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        calls = 0
+        original = self.jobs.update_progress
+
+        def update_progress(job_id, progress, message, now):
+            nonlocal calls
+            if progress == 20:
+                calls += 1
+                if calls == 2:
+                    loop.call_soon_threadsafe(gate.set)
+                    raise RuntimeError("heartbeat database detail")
+            return original(job_id, progress, message, now)
+
+        self.jobs.update_progress = update_progress
+        pipeline, _ = self.make_pipeline(
+            AI(),
+            transcriber=Transcriber(
+                error=RuntimeError("transcriber child detail"), gate=gate
+            ),
+            heartbeat=0.01,
+        )
+        with self.assertRaises(PipelinePersistenceError) as caught:
+            await pipeline.execute(self.job, lambda: False)
+        self.assertNotIn("child detail", str(caught.exception))
+
+    async def _assert_optional_heartbeat_failure(self, target, child_fails=False):
         gate = asyncio.Event()
         loop = asyncio.get_running_loop()
         counts = {}
@@ -627,11 +663,15 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             async def optimize(inner_self, text):
                 if target == 65:
                     await gate.wait()
+                    if child_fails:
+                        raise RuntimeError("optimization child detail")
                 return await super().optimize(text)
 
             async def summarize(inner_self, episode_id, transcript, language, title):
                 if target == 72:
                     await gate.wait()
+                    if child_fails:
+                        raise RuntimeError("summary child detail")
                 return await super().summarize(
                     episode_id, transcript, language, title
                 )
@@ -641,6 +681,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             ):
                 if target == 85:
                     await gate.wait()
+                    if child_fails:
+                        raise RuntimeError("chapter child detail")
                 return await super().generate_chapters(
                     episode_id, transcript, duration, poster
                 )

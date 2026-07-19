@@ -333,16 +333,18 @@ class EpisodePipeline:
                 task_canceled = True
             except BaseException as exc:
                 stage_error = exc
+        operation_error = None
+        result = None
         try:
             result = operation.result()
-        except BaseException:
-            if task_canceled:
-                raise asyncio.CancelledError from None
-            raise
+        except BaseException as exc:
+            operation_error = exc
         if task_canceled:
-            raise asyncio.CancelledError
+            raise asyncio.CancelledError from None
         if stage_error is not None:
-            raise stage_error
+            raise stage_error from None
+        if operation_error is not None:
+            raise operation_error
         self._check_cancel(cancel_check)
         return result
 
