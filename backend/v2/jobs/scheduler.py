@@ -77,15 +77,26 @@ class Scheduler:
                 return
             self._accepting_claims = False
             self._wakeup.set()
+            cancellation_requested = False
             try:
                 _, pending = await asyncio.wait(
                     self._workers, timeout=max(0, grace_period_sec)
                 )
             except asyncio.CancelledError:
-                await self._cancel_and_join(self._workers)
-                self._clear_workers()
-                raise
-            await self._cancel_and_join(pending)
+                cancellation_requested = True
+                _consume_current_cancellation()
+                pending = self._workers
+            cleanup = asyncio.create_task(self._finish_stop(pending))
+            cancellation_requested = await _await_cancellation_safe(
+                cleanup, cancellation_requested
+            )
+            if cancellation_requested:
+                raise asyncio.CancelledError
+
+    async def _finish_stop(self, workers) -> None:
+        try:
+            await self._cancel_and_join(workers)
+        finally:
             self._clear_workers()
 
     @staticmethod
@@ -187,3 +198,22 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
         "+00:00", "Z"
     )
+
+
+async def _await_cancellation_safe(
+    cleanup: asyncio.Task[None], cancellation_requested: bool
+) -> bool:
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            cancellation_requested = True
+            _consume_current_cancellation()
+    cleanup.result()
+    return cancellation_requested
+
+
+def _consume_current_cancellation() -> None:
+    current = asyncio.current_task()
+    if current is not None:
+        current.uncancel()

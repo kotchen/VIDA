@@ -45,6 +45,37 @@ class CancellationBlockingExecutor:
             raise
 
 
+class DelayedCancellationExecutor:
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.cancellation_cleanup_started = asyncio.Event()
+        self.release_cancellation_cleanup = asyncio.Event()
+        self.restarted = asyncio.Event()
+        self.started_count = 0
+
+    async def execute(self, job, cancel_check):
+        self.started_count += 1
+        self.started.set()
+        if self.started_count == 2:
+            self.restarted.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancellation_cleanup_started.set()
+            await self.release_cancellation_cleanup.wait()
+            raise
+
+
+class CountingJobRepository(JobRepository):
+    def __init__(self, database):
+        super().__init__(database)
+        self.recovery_calls = 0
+
+    def recover_interrupted(self, message):
+        self.recovery_calls += 1
+        return super().recover_interrupted(message)
+
+
 class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -163,6 +194,30 @@ class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.scheduler.worker_count, 0)
         self.assertEqual(self.jobs.get_required("j0").status, "processing")
         await self.scheduler.start()
+        self.assertEqual(self.scheduler.worker_count, 1)
+        await asyncio.wait_for(executor.restarted.wait(), 1)
+
+    async def test_repeated_cancel_during_forced_join_still_cleans_and_restarts(self):
+        jobs = CountingJobRepository(self.database)
+        executor = DelayedCancellationExecutor()
+        self.scheduler = Scheduler(jobs, executor, 1, 30)
+        await self.scheduler.start()
+        await asyncio.wait_for(executor.started.wait(), 1)
+
+        stop = asyncio.create_task(self.scheduler.stop(0))
+        await asyncio.wait_for(executor.cancellation_cleanup_started.wait(), 1)
+        stop.cancel()
+        await asyncio.sleep(0)
+        stop.cancel()
+        executor.release_cancellation_cleanup.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await stop
+
+        self.assertEqual(self.scheduler.worker_count, 0)
+        self.assertEqual(self._live_scheduler_workers(), [])
+        self.assertEqual(jobs.recovery_calls, 1)
+        await self.scheduler.start()
+        self.assertEqual(jobs.recovery_calls, 2)
         self.assertEqual(self.scheduler.worker_count, 1)
         await asyncio.wait_for(executor.restarted.wait(), 1)
 
