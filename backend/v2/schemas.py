@@ -7,6 +7,7 @@ from pydantic import (
     ConfigDict,
     Field,
     HttpUrl,
+    UrlConstraints,
     SecretStr,
     StringConstraints,
     field_validator,
@@ -30,6 +31,16 @@ class ApiModel(BaseModel):
 
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+ProviderProfileIdString = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
+]
+SummaryLanguageString = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=32)
+]
+EpisodeTitleString = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
+]
+EpisodeSourceUrl = Annotated[HttpUrl, UrlConstraints(max_length=2048)]
 
 
 class ProviderProfileCreate(ApiModel):
@@ -100,16 +111,20 @@ class ProviderConnectionTestResponse(ApiModel):
 
 
 class EpisodeUrlSubmission(ApiModel):
-    source_url: HttpUrl
-    provider_profile_id: NonEmptyString
-    summary_language: NonEmptyString
-    title: NonEmptyString | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    source_url: EpisodeSourceUrl
+    provider_profile_id: ProviderProfileIdString
+    summary_language: SummaryLanguageString
+    title: EpisodeTitleString | None = None
 
 
 class EpisodeUploadSubmission(ApiModel):
-    provider_profile_id: NonEmptyString
-    summary_language: NonEmptyString
-    title: NonEmptyString | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    provider_profile_id: ProviderProfileIdString
+    summary_language: SummaryLanguageString
+    title: EpisodeTitleString | None = None
 
 
 class EpisodeSubmissionResponse(ApiModel):

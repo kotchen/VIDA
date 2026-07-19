@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -75,13 +75,11 @@ class EpisodeSubmissionApiTests(unittest.TestCase):
         self.assertEqual(episode["current_job_id"], job["id"])
         self.runtime.scheduler.notify.assert_called_once_with()
 
-    def test_multipart_spool_is_closed_after_request(self):
-        original = self.runtime.episode_service.submit_upload
-        with patch.object(
-            self.runtime.episode_service,
-            "submit_upload",
-            new=AsyncMock(wraps=original),
-        ) as submit:
+    def test_multipart_request_does_not_use_uploadfile_spool(self):
+        with patch(
+            "starlette.requests.Request.form",
+            side_effect=AssertionError("request.form must not be called"),
+        ):
             response = self.client.post(
                 "/api/v2/episodes",
                 data={
@@ -92,8 +90,6 @@ class EpisodeSubmissionApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 202, response.text)
-        upload = submit.await_args.args[0]
-        self.assertTrue(upload.file.closed)
 
     def test_json_url_submission_uses_same_queue_and_normalizes_url(self):
         response = self.client.post(

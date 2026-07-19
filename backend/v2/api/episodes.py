@@ -1,21 +1,23 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterable
 
 from fastapi import APIRouter, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
-from starlette.datastructures import UploadFile
 
 from ..container import V2Runtime
 from ..errors import V2Error
 from ..schemas import (
     EpisodeSubmissionResponse,
-    EpisodeUploadSubmission,
     EpisodeUrlSubmission,
 )
 from ..services.episodes import EpisodeSubmission
+
+
+JSON_BODY_MAX_BYTES = 16 * 1024
 
 
 def create_episode_router(runtime: V2Runtime) -> APIRouter:
@@ -35,30 +37,16 @@ def create_episode_router(runtime: V2Runtime) -> APIRouter:
         )
         service = runtime.require_episodes()
         if media_type == "multipart/form-data":
-            async with request.form() as form:
-                file = form.get("file")
-                if not isinstance(file, UploadFile):
-                    raise _validation_error("file", "Upload file is required")
-                metadata = _validate(
-                    EpisodeUploadSubmission,
-                    {
-                        "providerProfileId": form.get("providerProfileId"),
-                        "summaryLanguage": form.get("summaryLanguage"),
-                        "title": form.get("title"),
-                    },
-                )
-                submission = await service.submit_upload(
-                    file,
-                    metadata.provider_profile_id,
-                    metadata.summary_language,
-                    metadata.title,
-                    runtime.settings.upload_max_bytes,
-                )
+            submission = await service.submit_multipart(
+                request.stream(),
+                request.headers.get("content-type", ""),
+                _content_length(request),
+                runtime.settings.upload_max_bytes,
+            )
         elif media_type == "application/json":
-            try:
-                raw_payload = await request.json()
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                raise _validation_error("body", "Request body must be valid JSON") from None
+            raw_payload = await _bounded_json_body(
+                request.stream(), _content_length(request)
+            )
             payload = _validate(EpisodeUrlSubmission, raw_payload)
             submission = service.submit_url(
                 str(payload.source_url),
@@ -95,6 +83,35 @@ def _validation_error(field: str, message: str) -> RequestValidationError:
     return RequestValidationError(
         [{"type": "value_error", "loc": ("body", field), "msg": message, "input": None}]
     )
+
+
+def _content_length(request: Request) -> int | None:
+    value = request.headers.get("content-length")
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise V2Error("invalid_source", "Invalid Content-Length", 400, {}) from None
+    if parsed < 0:
+        raise V2Error("invalid_source", "Invalid Content-Length", 400, {})
+    return parsed
+
+
+async def _bounded_json_body(
+    stream: AsyncIterable[bytes], content_length: int | None
+):
+    if content_length is not None and content_length > JSON_BODY_MAX_BYTES:
+        raise V2Error("file_too_large", "JSON request body is too large", 413, {})
+    body = bytearray()
+    async for chunk in stream:
+        if len(body) + len(chunk) > JSON_BODY_MAX_BYTES:
+            raise V2Error("file_too_large", "JSON request body is too large", 413, {})
+        body.extend(chunk)
+    try:
+        return json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise _validation_error("body", "Request body must be valid JSON") from None
 
 
 def _response(submission: EpisodeSubmission) -> EpisodeSubmissionResponse:
