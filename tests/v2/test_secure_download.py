@@ -145,6 +145,31 @@ class SecureDownloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.closed)
         self.assertFalse(any(self.directory.glob("*.part")))
 
+    async def test_cancel_at_open_handoff_closes_completed_response(self):
+        owner = asyncio.current_task()
+
+        class HandoffResponse(FakeResponse):
+            async def close(self):
+                asyncio.get_running_loop().call_soon(owner.cancel)
+                await asyncio.sleep(0)
+                self.closed = True
+
+        response = HandoffResponse()
+
+        class HandoffClient:
+            async def open(self, url, connect_ip):
+                asyncio.get_running_loop().call_soon(owner.cancel)
+                return response
+
+        downloader = SecureDownloader(
+            FakeResolver([["8.8.8.8"]]), HandoffClient()
+        )
+        with self.assertRaises(asyncio.CancelledError):
+            await downloader.download(
+                "https://example.com/a", self.directory, lambda: False
+            )
+        self.assertTrue(response.closed)
+
     async def test_rejects_credentials_bad_scheme_excess_redirects_and_html(self):
         cases = [
             "file:///etc/passwd",

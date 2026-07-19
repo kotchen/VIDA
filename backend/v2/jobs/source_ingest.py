@@ -575,9 +575,12 @@ class SecureDownloader:
                     _phase_timeout(deadline, self._timeouts.dns_sec),
                 )
                 connect_ip = addresses[0]
-                response = await _await_phase(
+                response = await _acquire_owned_resource(
                     self._client.open(current, connect_ip), cancel_check,
                     _phase_timeout(deadline, self._timeouts.connect_sec),
+                    lambda acquired: _bounded_response_close(
+                        acquired, self._timeouts.close_sec
+                    ),
                 )
                 rebound = await self._public_addresses(
                     parsed.hostname, port, cancel_check,
@@ -752,8 +755,12 @@ class SSRFProxy:
         if not addresses or any(not _is_public_unicast(value) for value in addresses):
             raise DownloadError("Remote address is not allowed")
         selected = addresses[0]
-        reader, writer = await _await_phase(
-            self._connector(selected, port), cancel_check, self._timeouts.connect_sec
+        reader, writer = await _acquire_owned_resource(
+            self._connector(selected, port), cancel_check,
+            self._timeouts.connect_sec,
+            lambda acquired: _close_connected_writer(
+                acquired, self._timeouts.close_sec
+            ),
         )
         try:
             peer = writer.get_extra_info("peername")
@@ -1054,6 +1061,63 @@ async def _await_phase(awaitable, cancel_check, timeout_sec):
         operation.cancel()
         await asyncio.gather(operation, return_exceptions=True)
         raise
+
+
+async def _acquire_owned_resource(
+    awaitable, cancel_check, timeout_sec, release
+):
+    """Transfer a completed resource or release it before propagating failure."""
+    operation = asyncio.ensure_future(awaitable)
+    deadline = asyncio.get_running_loop().time() + timeout_sec
+    try:
+        while not operation.done():
+            if cancel_check():
+                raise JobCanceled
+            if asyncio.get_running_loop().time() >= deadline:
+                raise asyncio.TimeoutError
+            await asyncio.wait((operation,), timeout=min(0.05, timeout_sec))
+        return operation.result()
+    except BaseException:
+        operation.cancel()
+        await _settle_task_uninterruptibly(operation)
+        resource = None
+        if not operation.cancelled() and operation.exception() is None:
+            resource = operation.result()
+        if resource is not None:
+            try:
+                cleanup = asyncio.ensure_future(release(resource))
+            except BaseException:
+                cleanup = None
+            if cleanup is not None:
+                await _settle_task_uninterruptibly(cleanup)
+        raise
+
+
+async def _settle_task_uninterruptibly(task: asyncio.Future) -> None:
+    current = asyncio.current_task()
+    while not task.done():
+        try:
+            await asyncio.wait((task,), timeout=0.05)
+        except asyncio.CancelledError:
+            # Preserve the original exception at the ownership boundary, but
+            # do not let repeated cancellation interrupt resource cleanup.
+            if current is not None:
+                current.uncancel()
+    if not task.cancelled():
+        task.exception()
+
+
+async def _bounded_response_close(response, timeout_sec: float) -> None:
+    try:
+        await asyncio.wait_for(response.close(), timeout_sec)
+    except Exception:
+        pass
+
+
+async def _close_connected_writer(acquired, timeout_sec: float) -> None:
+    _, writer = acquired
+    writer.close()
+    await _bounded_writer_close(writer, timeout_sec)
 
 
 def _check_deadline(deadline: float) -> None:

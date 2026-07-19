@@ -331,6 +331,35 @@ class ControlledProxyTests(unittest.IsolatedAsyncioTestCase):
                         await task
                 self.assertTrue(writer.closed)
 
+    async def test_cancel_at_connector_handoff_closes_completed_writer(self):
+        class Writer:
+            def __init__(self):
+                self.closed = False
+                self.joined = False
+
+            def close(self):
+                self.closed = True
+
+            async def wait_closed(self):
+                asyncio.get_running_loop().call_soon(owner.cancel)
+                await asyncio.sleep(0)
+                self.joined = True
+
+        writer = Writer()
+        owner = asyncio.current_task()
+
+        async def connector(host, port):
+            asyncio.get_running_loop().call_soon(owner.cancel)
+            return object(), writer
+
+        proxy = SSRFProxy(
+            resolver=FakeResolver([["8.8.8.8"]]), connector=connector
+        )
+        with self.assertRaises(asyncio.CancelledError):
+            await proxy.connect_target("example.com", 443, lambda: False)
+        self.assertTrue(writer.closed)
+        self.assertTrue(writer.joined)
+
     def test_connect_authority_and_headers_are_strict(self):
         valid_token = "token"
         auth = base64.b64encode(b"token:").decode()
