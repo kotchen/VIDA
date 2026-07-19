@@ -188,6 +188,27 @@ class JobRepositoryTests(unittest.TestCase):
                     (None, "failed", 50),
                 )
 
+    def test_enqueue_rejects_submicrosecond_precision_without_mutation(self):
+        for index, submitted_at in enumerate((
+            "2026-07-18T00:00:00.1234567Z",
+            "2026-07-18T00:00:00.123456789+00:00",
+        )):
+            with self.subTest(submitted_at=submitted_at):
+                self._reset_database()
+                self._episode("e1", status="failed", progress=50, message="Old error")
+                job = self._job("e1", f"j{index}", submitted_at=submitted_at)
+
+                with self.assertRaisesRegex(ValueError, "submitted_at"):
+                    self.repo.enqueue(job)
+
+                self.assertIsNone(self.repo.get(job.id))
+                episode = self._episode_row("e1")
+                self.assertEqual(
+                    (episode["current_job_id"], episode["status"], episode["progress"],
+                     episode["message"]),
+                    (None, "failed", 50, "Old error"),
+                )
+
     def test_claims_fifo_once_across_concurrent_callers(self):
         self._episode("e1")
         self._episode("e2")

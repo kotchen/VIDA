@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from sqlite3 import Connection, Row
 
@@ -236,6 +237,10 @@ _JOB_COLUMNS = (
     "error_code", "error_message",
 )
 
+_UTC_TIMESTAMP_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)$"
+)
+
 
 def _select_job(conn: Connection, job_id: str) -> Row | None:
     return conn.execute(
@@ -272,9 +277,7 @@ def _validate_fresh_job(job: JobRecord) -> None:
 
 
 def _canonical_utc_timestamp(value: str, field: str) -> str:
-    if not isinstance(value, str):
-        raise ValueError(f"{field} must be a UTC ISO-8601 timestamp")
-    if not (value.endswith("Z") or value.endswith("+00:00")):
+    if not isinstance(value, str) or _UTC_TIMESTAMP_PATTERN.fullmatch(value) is None:
         raise ValueError(f"{field} must be a UTC ISO-8601 timestamp")
     try:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
