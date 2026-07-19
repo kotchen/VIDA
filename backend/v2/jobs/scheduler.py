@@ -32,6 +32,7 @@ class Scheduler:
         self._claim_lock = asyncio.Lock()
         self._start_condition = asyncio.Condition()
         self._lifecycle_lock = asyncio.Lock()
+        self._repository_tasks: set[asyncio.Task] = set()
         self._claimed_sequence = 0
         self._next_start_sequence = 0
         self._waiting_workers: set[int] = set()
@@ -50,7 +51,7 @@ class Scheduler:
         async with self._lifecycle_lock:
             if self._workers:
                 return
-            await asyncio.to_thread(
+            await self._repository_call(
                 self._jobs.recover_interrupted, "Service restarted; job requeued"
             )
             self._accepting_claims = True
@@ -87,7 +88,7 @@ class Scheduler:
                 _consume_current_cancellation()
                 pending = self._workers
             cleanup = asyncio.create_task(self._finish_stop(pending))
-            cancellation_requested = await _await_cancellation_safe(
+            cancellation_requested, _ = await _await_cancellation_safe(
                 cleanup, cancellation_requested
             )
             if cancellation_requested:
@@ -96,6 +97,7 @@ class Scheduler:
     async def _finish_stop(self, workers) -> None:
         try:
             await self._cancel_and_join(workers)
+            await self._join_repository_tasks()
         finally:
             self._clear_workers()
 
@@ -112,13 +114,30 @@ class Scheduler:
         self._waiting_workers.clear()
         self._active_jobs = 0
 
+    async def _join_repository_tasks(self) -> None:
+        while self._repository_tasks:
+            await asyncio.gather(
+                *tuple(self._repository_tasks), return_exceptions=True
+            )
+
+    async def _repository_call(self, function, *args):
+        operation = asyncio.create_task(asyncio.to_thread(function, *args))
+        self._repository_tasks.add(operation)
+        try:
+            cancellation_requested, result = await _await_cancellation_safe(operation)
+            if cancellation_requested:
+                raise asyncio.CancelledError
+            return result
+        finally:
+            self._repository_tasks.discard(operation)
+
     async def _worker(self, index: int) -> None:
         worker_id = f"{self._worker_prefix}-{index}"
         while self._accepting_claims:
             self._waiting_workers.discard(index)
             try:
                 async with self._claim_lock:
-                    job = await asyncio.to_thread(
+                    job = await self._repository_call(
                         self._jobs.claim_next, worker_id, _utc_now()
                     )
                     sequence = self._claimed_sequence
@@ -177,9 +196,9 @@ class Scheduler:
         except asyncio.CancelledError:
             raise
         except JobCanceled:
-            await asyncio.to_thread(self._jobs.mark_canceled, job.id, _utc_now())
+            await self._repository_call(self._jobs.mark_canceled, job.id, _utc_now())
         except Exception:
-            await asyncio.to_thread(
+            await self._repository_call(
                 self._jobs.fail,
                 job.id,
                 "job_execution_failed",
@@ -187,7 +206,7 @@ class Scheduler:
                 _utc_now(),
             )
         else:
-            await asyncio.to_thread(self._jobs.complete, job.id, _utc_now())
+            await self._repository_call(self._jobs.complete, job.id, _utc_now())
 
     def _cancel_requested(self, job_id: str) -> bool:
         current = self._jobs.get(job_id)
@@ -201,16 +220,21 @@ def _utc_now() -> str:
 
 
 async def _await_cancellation_safe(
-    cleanup: asyncio.Task[None], cancellation_requested: bool
-) -> bool:
-    while not cleanup.done():
+    operation: asyncio.Task, cancellation_requested: bool = False
+):
+    while not operation.done():
         try:
-            await asyncio.shield(cleanup)
+            await asyncio.shield(operation)
         except asyncio.CancelledError:
             cancellation_requested = True
             _consume_current_cancellation()
-    cleanup.result()
-    return cancellation_requested
+    try:
+        result = operation.result()
+    except BaseException:
+        if cancellation_requested:
+            raise asyncio.CancelledError from None
+        raise
+    return cancellation_requested, result
 
 
 def _consume_current_cancellation() -> None:

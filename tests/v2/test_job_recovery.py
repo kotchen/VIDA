@@ -1,5 +1,6 @@
 import asyncio
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -73,6 +74,46 @@ class CountingJobRepository(JobRepository):
 
     def recover_interrupted(self, message):
         self.recovery_calls += 1
+        return super().recover_interrupted(message)
+
+
+class BlockingClaimRepository(JobRepository):
+    def __init__(self, database):
+        super().__init__(database)
+        self.claim_entered = threading.Event()
+        self.release_claim = threading.Event()
+        self.claim_finished = threading.Event()
+        self._claim_count = 0
+
+    def claim_next(self, worker_id, now):
+        self._claim_count += 1
+        if self._claim_count == 1:
+            self.claim_entered.set()
+            self.release_claim.wait()
+            try:
+                return super().claim_next(worker_id, now)
+            finally:
+                self.claim_finished.set()
+        return super().claim_next(worker_id, now)
+
+
+class BlockingRecoveryRepository(JobRepository):
+    def __init__(self, database):
+        super().__init__(database)
+        self.recovery_entered = threading.Event()
+        self.release_recovery = threading.Event()
+        self.recovery_finished = threading.Event()
+        self.recovery_calls = 0
+
+    def recover_interrupted(self, message):
+        self.recovery_calls += 1
+        if self.recovery_calls == 1:
+            self.recovery_entered.set()
+            self.release_recovery.wait()
+            try:
+                return super().recover_interrupted(message)
+            finally:
+                self.recovery_finished.set()
         return super().recover_interrupted(message)
 
 
@@ -221,6 +262,53 @@ class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.scheduler.worker_count, 1)
         await asyncio.wait_for(executor.restarted.wait(), 1)
 
+    async def test_canceled_stop_joins_claim_thread_before_restart_recovery(self):
+        jobs = BlockingClaimRepository(self.database)
+        executor = CancellationBlockingExecutor()
+        self.scheduler = Scheduler(jobs, executor, 1, 30)
+        await self.scheduler.start()
+        self.assertTrue(await asyncio.to_thread(jobs.claim_entered.wait, 1))
+
+        stop = asyncio.create_task(self.scheduler.stop(30))
+        await asyncio.sleep(0)
+        stop.cancel()
+        await self._yield_turns(20)
+        finished_before_claim = stop.done()
+        jobs.release_claim.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await stop
+        self.assertTrue(await asyncio.to_thread(jobs.claim_finished.wait, 1))
+
+        self.assertFalse(finished_before_claim)
+        self.assertEqual(self.jobs.get_required("j0").status, "processing")
+        await self.scheduler.start()
+        await asyncio.wait_for(executor.started.wait(), 1)
+        self.assertEqual(self.jobs.get_required("j0").status, "processing")
+
+    async def test_canceled_start_joins_recovery_before_replacement_start(self):
+        jobs = BlockingRecoveryRepository(self.database)
+        executor = CancellationBlockingExecutor()
+        self.scheduler = Scheduler(jobs, executor, 1, 30)
+        canceled_start = asyncio.create_task(self.scheduler.start())
+        self.assertTrue(await asyncio.to_thread(jobs.recovery_entered.wait, 1))
+
+        canceled_start.cancel()
+        replacement_start = asyncio.create_task(self.scheduler.start())
+        await self._yield_turns(20)
+        canceled_finished_before_recovery = canceled_start.done()
+        replacement_started_before_recovery = self.scheduler.worker_count
+        jobs.release_recovery.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await canceled_start
+        await replacement_start
+        self.assertTrue(await asyncio.to_thread(jobs.recovery_finished.wait, 1))
+        await asyncio.wait_for(executor.started.wait(), 1)
+
+        self.assertFalse(canceled_finished_before_recovery)
+        self.assertEqual(replacement_started_before_recovery, 0)
+        self.assertEqual(jobs.recovery_calls, 2)
+        self.assertEqual(self.jobs.get_required("j0").status, "processing")
+
     async def test_runtime_uses_configured_workers_and_fastapi_lifespan(self):
         executor = RecordingExecutor()
         runtime = build_test_runtime(
@@ -274,6 +362,11 @@ class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    @staticmethod
+    async def _yield_turns(count: int) -> None:
+        for _ in range(count):
+            await asyncio.sleep(0)
 
 
 if __name__ == "__main__":
