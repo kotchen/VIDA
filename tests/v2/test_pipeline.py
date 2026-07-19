@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from backend.transcriber import StructuredTranscription, TranscriptSegment
+from backend.transcriber import Transcriber as ProductionTranscriber
 from backend.v2.database import Database
 from backend.v2.bootstrap import build_test_runtime
 from backend.v2.crypto import CredentialCipher
@@ -56,6 +57,23 @@ class Media:
     def commit_file(self, staged, final):
         final.parent.mkdir(parents=True, exist_ok=True)
         staged.replace(final)
+
+
+class BlockingWhisperModel:
+    def __init__(self):
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.finished = threading.Event()
+
+    def transcribe(self, *args, **kwargs):
+        def segments():
+            self.started.set()
+            self.release.wait(timeout=2)
+            self.finished.set()
+            yield SimpleNamespace(start=0.0, end=1.0, text="text")
+
+        info = SimpleNamespace(language="en", language_probability=0.9)
+        return segments(), info
 
 
 class Transcriber:
@@ -293,6 +311,98 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             (self.data / "episodes" / "episode-1" / "attempts" / "job-1").exists()
         )
         self.assertIsNone(self.episodes.get("episode-1").media_path)
+
+    async def test_repeated_cancel_joins_whisper_before_attempt_cleanup(self):
+        model = BlockingWhisperModel()
+        transcriber = ProductionTranscriber()
+        transcriber.model = model
+        pipeline, _ = self.make_pipeline(AI(), transcriber=transcriber, heartbeat=0.01)
+
+        task = asyncio.create_task(pipeline.execute(self.job, lambda: False))
+        self.assertTrue(await asyncio.to_thread(model.started.wait, 1))
+        attempt = self.data / "episodes" / "episode-1" / "attempts" / "job-1"
+        task.cancel()
+        await asyncio.sleep(0.02)
+        done_after_first_cancel = task.done()
+        attempt_after_first_cancel = attempt.exists()
+        task.cancel()
+        await asyncio.sleep(0.02)
+        done_after_second_cancel = task.done()
+        attempt_after_second_cancel = attempt.exists()
+        model.release.set()
+        outcome = (await asyncio.gather(task, return_exceptions=True))[0]
+
+        self.assertFalse(done_after_first_cancel)
+        self.assertFalse(done_after_second_cancel)
+        self.assertTrue(attempt_after_first_cancel)
+        self.assertTrue(attempt_after_second_cancel)
+        self.assertTrue(model.finished.is_set())
+        self.assertIsInstance(outcome, asyncio.CancelledError)
+        self.assertFalse(attempt.exists())
+
+    async def test_scheduler_stop_waits_for_canceled_whisper_then_marks_job_canceled(self):
+        with self.database.transaction() as conn:
+            conn.execute(
+                "UPDATE jobs SET status='queued',started_at=NULL,finished_at=NULL,"
+                "cancel_requested_at=NULL,heartbeat_at=NULL,worker_id=NULL,progress=0,"
+                "message='Queued' WHERE id='job-1'"
+            )
+        model = BlockingWhisperModel()
+        transcriber = ProductionTranscriber()
+        transcriber.model = model
+        pipeline, _ = self.make_pipeline(AI(), transcriber=transcriber, heartbeat=0.01)
+        scheduler = Scheduler(self.jobs, pipeline, 1, 1)
+        await scheduler.start()
+        self.assertTrue(await asyncio.to_thread(model.started.wait, 1))
+        self.jobs.request_cancel("job-1", NOW)
+        self.jobs.request_cancel("job-1", NOW)
+        stop = asyncio.create_task(scheduler.stop(5))
+        await asyncio.sleep(0.02)
+        stopped_while_reading = stop.done()
+        attempt = self.data / "episodes" / "episode-1" / "attempts" / "job-1"
+        attempt_while_reading = attempt.exists()
+        model.release.set()
+        await stop
+
+        self.assertFalse(stopped_while_reading)
+        self.assertTrue(attempt_while_reading)
+        self.assertTrue(model.finished.is_set())
+        self.assertFalse(attempt.exists())
+        self.assertEqual(self.jobs.get_required("job-1").status, "canceled")
+
+    async def test_cancel_joins_optional_summary_write_before_returning(self):
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        original = self.episodes.replace_summary
+
+        def replace_summary(*args, **kwargs):
+            started.set()
+            release.wait(timeout=2)
+            original(*args, **kwargs)
+            finished.set()
+
+        self.episodes.replace_summary = replace_summary
+        pipeline, _ = self.make_pipeline(AI(), heartbeat=0.01)
+        task = asyncio.create_task(pipeline.execute(self.job, lambda: False))
+        self.assertTrue(await asyncio.to_thread(started.wait, 1))
+        task.cancel()
+        await asyncio.sleep(0.02)
+        done_after_first_cancel = task.done()
+        task.cancel()
+        await asyncio.sleep(0.02)
+        done_after_second_cancel = task.done()
+        write_finished_before_release = finished.is_set()
+        release.set()
+        outcome = (await asyncio.gather(task, return_exceptions=True))[0]
+        persisted_after_return = self.episodes.get_summary("episode-1")
+
+        self.assertFalse(done_after_first_cancel)
+        self.assertFalse(done_after_second_cancel)
+        self.assertFalse(write_finished_before_release)
+        self.assertTrue(finished.is_set())
+        self.assertIsInstance(outcome, asyncio.CancelledError)
+        self.assertEqual(persisted_after_return.content, "Summary")
 
     async def test_summary_write_failure_warns_and_preserves_previous_summary(self):
         old = SummaryRecord("episode-1", "Old summary", 1, 1, 80, "VIDA")

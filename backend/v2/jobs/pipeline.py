@@ -292,33 +292,48 @@ class EpisodePipeline:
     ):
         try:
             self._check_cancel(cancel_check)
-            await asyncio.to_thread(
+            canceled, _ = await _owned_to_thread(
                 self._jobs.update_progress, job.id, progress, message, self._now()
             )
+            if canceled:
+                raise asyncio.CancelledError
         except BaseException:
             if inspect.iscoroutine(awaitable):
                 awaitable.close()
             raise
         operation = asyncio.ensure_future(awaitable)
-        try:
-            while not operation.done():
+        task_canceled = False
+        stage_error = None
+        while not operation.done():
+            try:
                 done, _ = await asyncio.wait(
                     (operation,), timeout=self._heartbeat_interval
                 )
-                if done:
-                    break
-                await asyncio.to_thread(
-                    self._jobs.update_progress,
-                    job.id,
-                    progress,
-                    message,
-                    self._now(),
+            except asyncio.CancelledError:
+                task_canceled = True
+                _consume_current_cancellation()
+                continue
+            if done or stage_error is not None:
+                continue
+            try:
+                canceled, _ = await _owned_to_thread(
+                    self._jobs.update_progress, job.id, progress, message, self._now()
                 )
+                task_canceled = task_canceled or canceled
+            except asyncio.CancelledError:
+                task_canceled = True
+            except BaseException as exc:
+                stage_error = exc
+        try:
             result = operation.result()
         except BaseException:
-            operation.cancel()
-            await asyncio.gather(operation, return_exceptions=True)
+            if task_canceled:
+                raise asyncio.CancelledError from None
             raise
+        if task_canceled:
+            raise asyncio.CancelledError
+        if stage_error is not None:
+            raise stage_error
         self._check_cancel(cancel_check)
         return result
 
