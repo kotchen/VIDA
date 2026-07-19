@@ -5,6 +5,7 @@ import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from backend.transcriber import StructuredTranscription, TranscriptSegment
 from backend.transcriber import Transcriber as ProductionTranscriber
@@ -14,7 +15,9 @@ from backend.v2.crypto import CredentialCipher
 from backend.v2.domain import (
     ChapterRecord, EpisodeRecord, JobRecord, SummaryRecord,
 )
-from backend.v2.jobs.models import JobCanceled, TranscriptionFailed
+from backend.v2.jobs.models import (
+    JobCanceled, PipelinePersistenceError, TranscriptionFailed,
+)
 from backend.v2.jobs.ai import AIProcessor
 from backend.v2.jobs.pipeline import EpisodePipeline
 from backend.v2.jobs.scheduler import Scheduler
@@ -403,6 +406,253 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(finished.is_set())
         self.assertIsInstance(outcome, asyncio.CancelledError)
         self.assertEqual(persisted_after_return.content, "Summary")
+
+    async def test_scheduler_stop_joins_blocked_final_completion(self):
+        with self.database.transaction() as conn:
+            conn.execute(
+                "UPDATE jobs SET status='queued',started_at=NULL,finished_at=NULL,"
+                "cancel_requested_at=NULL,heartbeat_at=NULL,worker_id=NULL,progress=0,"
+                "message='Queued' WHERE id='job-1'"
+            )
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        original = self.jobs.complete
+
+        def complete(*args, **kwargs):
+            started.set()
+            release.wait(timeout=2)
+            original(*args, **kwargs)
+            finished.set()
+
+        self.jobs.complete = complete
+        pipeline, _ = self.make_pipeline(AI(), heartbeat=0.01)
+        scheduler = Scheduler(self.jobs, pipeline, 1, 1)
+        await scheduler.start()
+        self.assertTrue(await asyncio.to_thread(started.wait, 1))
+        stop = asyncio.create_task(scheduler.stop(0))
+        await asyncio.sleep(0.02)
+        done_after_worker_cancel = stop.done()
+        stop.cancel()
+        await asyncio.sleep(0.02)
+        done_after_first_repeat = stop.done()
+        stop.cancel()
+        await asyncio.sleep(0.02)
+        done_after_second_repeat = stop.done()
+        release.set()
+        outcome = (await asyncio.gather(stop, return_exceptions=True))[0]
+        self.assertTrue(await asyncio.to_thread(finished.wait, 1))
+
+        self.assertFalse(done_after_worker_cancel)
+        self.assertFalse(done_after_first_repeat)
+        self.assertFalse(done_after_second_repeat)
+        self.assertTrue(finished.is_set())
+        self.assertIsInstance(outcome, asyncio.CancelledError)
+        self.assertEqual(self.jobs.get_required("job-1").status, "completed")
+
+    async def test_repeated_cancel_joins_saving_transcript_progress(self):
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        original = self.jobs.update_progress
+
+        def update_progress(job_id, progress, message, now):
+            if progress == 60:
+                started.set()
+                release.wait(timeout=2)
+            result = original(job_id, progress, message, now)
+            if progress == 60:
+                finished.set()
+            return result
+
+        self.jobs.update_progress = update_progress
+        pipeline, _ = self.make_pipeline(AI(), heartbeat=0.01)
+        task = asyncio.create_task(pipeline.execute(self.job, lambda: False))
+        self.assertTrue(await asyncio.to_thread(started.wait, 1))
+        task.cancel()
+        await asyncio.sleep(0.02)
+        done_after_first_cancel = task.done()
+        task.cancel()
+        await asyncio.sleep(0.02)
+        done_after_second_cancel = task.done()
+        release.set()
+        outcome = (await asyncio.gather(task, return_exceptions=True))[0]
+        self.assertTrue(await asyncio.to_thread(finished.wait, 1))
+
+        self.assertFalse(done_after_first_cancel)
+        self.assertFalse(done_after_second_cancel)
+        self.assertTrue(finished.is_set())
+        self.assertIsInstance(outcome, asyncio.CancelledError)
+        self.assertEqual(self.episodes.get_transcript("episode-1"), [])
+
+    async def test_repeated_cancel_joins_external_media_copy_before_cleanup(self):
+        external = self.data / "episodes" / "episode-1" / "source" / "external.mp3"
+        external.parent.mkdir(parents=True, exist_ok=True)
+        external.write_bytes(b"external")
+
+        class ExternalSource:
+            async def prepare(inner_self, episode, attempt_dir, cancel_check, progress=None):
+                attempt_dir.mkdir(parents=True, exist_ok=True)
+                poster = attempt_dir / "poster.png"
+                poster.write_bytes(b"poster")
+                return PreparedSource(
+                    external, 30.0, None, "audio/mpeg", poster, "image/png"
+                )
+
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        real_copyfile = __import__("shutil").copyfile
+
+        def copyfile(source, destination):
+            result = real_copyfile(source, destination)
+            started.set()
+            release.wait(timeout=2)
+            finished.set()
+            return result
+
+        pipeline, _ = self.make_pipeline(AI())
+        pipeline._source = ExternalSource()
+        with patch("backend.v2.jobs.pipeline.shutil.copyfile", side_effect=copyfile):
+            task = asyncio.create_task(pipeline.execute(self.job, lambda: False))
+            self.assertTrue(await asyncio.to_thread(started.wait, 1))
+            attempt = self.data / "episodes" / "episode-1" / "attempts" / "job-1"
+            task.cancel()
+            await asyncio.sleep(0.02)
+            done_after_first_cancel = task.done()
+            attempt_after_first_cancel = attempt.exists()
+            task.cancel()
+            await asyncio.sleep(0.02)
+            done_after_second_cancel = task.done()
+            attempt_after_second_cancel = attempt.exists()
+            release.set()
+            outcome = (await asyncio.gather(task, return_exceptions=True))[0]
+            self.assertTrue(await asyncio.to_thread(finished.wait, 1))
+
+        self.assertFalse(done_after_first_cancel)
+        self.assertFalse(done_after_second_cancel)
+        self.assertTrue(attempt_after_first_cancel)
+        self.assertTrue(attempt_after_second_cancel)
+        self.assertTrue(finished.is_set())
+        self.assertIsInstance(outcome, asyncio.CancelledError)
+        self.assertFalse(attempt.exists())
+        self.assertTrue(external.exists())
+
+    async def test_repeated_cancel_joins_attempt_removal(self):
+        class FailingSource:
+            async def prepare(inner_self, episode, attempt_dir, cancel_check, progress=None):
+                attempt_dir.mkdir(parents=True, exist_ok=True)
+                (attempt_dir / "partial").write_bytes(b"partial")
+                raise RuntimeError("source failure")
+
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        real_rmtree = __import__("shutil").rmtree
+
+        def rmtree(path):
+            started.set()
+            release.wait(timeout=2)
+            result = real_rmtree(path)
+            finished.set()
+            return result
+
+        pipeline, _ = self.make_pipeline(AI())
+        pipeline._source = FailingSource()
+        with patch("backend.v2.jobs.source_ingest.shutil.rmtree", side_effect=rmtree):
+            task = asyncio.create_task(pipeline.execute(self.job, lambda: False))
+            self.assertTrue(await asyncio.to_thread(started.wait, 1))
+            attempt = self.data / "episodes" / "episode-1" / "attempts" / "job-1"
+            task.cancel()
+            await asyncio.sleep(0.02)
+            done_after_first_cancel = task.done()
+            task.cancel()
+            await asyncio.sleep(0.02)
+            done_after_second_cancel = task.done()
+            release.set()
+            outcome = (await asyncio.gather(task, return_exceptions=True))[0]
+            self.assertTrue(await asyncio.to_thread(finished.wait, 1))
+
+        self.assertFalse(done_after_first_cancel)
+        self.assertFalse(done_after_second_cancel)
+        self.assertTrue(finished.is_set())
+        self.assertIsInstance(outcome, asyncio.CancelledError)
+        self.assertFalse(attempt.exists())
+
+    async def test_optimization_heartbeat_failure_is_terminal(self):
+        await self._assert_optional_heartbeat_failure(65)
+
+    async def test_summary_heartbeat_failure_is_terminal(self):
+        await self._assert_optional_heartbeat_failure(72)
+
+    async def test_chapter_heartbeat_failure_is_terminal(self):
+        await self._assert_optional_heartbeat_failure(85)
+
+    async def test_transcription_heartbeat_failure_stays_infrastructure_typed(self):
+        gate = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        calls = 0
+        original = self.jobs.update_progress
+
+        def update_progress(job_id, progress, message, now):
+            nonlocal calls
+            if progress == 20:
+                calls += 1
+                if calls == 2:
+                    loop.call_soon_threadsafe(gate.set)
+                    raise RuntimeError("heartbeat database detail")
+            return original(job_id, progress, message, now)
+
+        self.jobs.update_progress = update_progress
+        pipeline, _ = self.make_pipeline(
+            AI(), transcriber=Transcriber(gate=gate), heartbeat=0.01
+        )
+        with self.assertRaises(PipelinePersistenceError):
+            await pipeline.execute(self.job, lambda: False)
+
+    async def _assert_optional_heartbeat_failure(self, target):
+        gate = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        counts = {}
+        original = self.jobs.update_progress
+
+        def update_progress(job_id, progress, message, now):
+            counts[progress] = counts.get(progress, 0) + 1
+            if progress == target and counts[progress] == 2:
+                loop.call_soon_threadsafe(gate.set)
+                raise RuntimeError("heartbeat database detail")
+            return original(job_id, progress, message, now)
+
+        class StageAI(AI):
+            async def optimize(inner_self, text):
+                if target == 65:
+                    await gate.wait()
+                return await super().optimize(text)
+
+            async def summarize(inner_self, episode_id, transcript, language, title):
+                if target == 72:
+                    await gate.wait()
+                return await super().summarize(
+                    episode_id, transcript, language, title
+                )
+
+            async def generate_chapters(
+                inner_self, episode_id, transcript, duration, poster
+            ):
+                if target == 85:
+                    await gate.wait()
+                return await super().generate_chapters(
+                    episode_id, transcript, duration, poster
+                )
+
+        self.jobs.update_progress = update_progress
+        pipeline, _ = self.make_pipeline(StageAI(), heartbeat=0.01)
+        await Scheduler(self.jobs, pipeline, 1, 1)._execute(self.job)
+
+        self.assertEqual(self.jobs.get_required("job-1").status, "failed")
+        episode = self.episodes.get("episode-1")
+        self.assertEqual(episode.status, "failed")
+        self.assertEqual(episode.warnings, [])
 
     async def test_summary_write_failure_warns_and_preserves_previous_summary(self):
         old = SummaryRecord("episode-1", "Old summary", 1, 1, 80, "VIDA")

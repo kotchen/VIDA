@@ -19,6 +19,7 @@ from typing import Protocol
 from urllib.parse import urljoin, urlsplit
 
 from ..domain import EpisodeRecord
+from .blocking import run_owned_to_thread
 from .models import JobCanceled
 
 
@@ -311,7 +312,7 @@ class SourceIngestor:
                 raise SourceIngestError("Media processing failed")
             metadata = _probe_metadata(result.stdout, media)
             poster = attempt / ("poster.jpg" if metadata[2] else "poster.png")
-            await asyncio.to_thread(poster.parent.mkdir, parents=True, exist_ok=True)
+            await run_owned_to_thread(poster.parent.mkdir, parents=True, exist_ok=True)
             if metadata[2]:
                 result = await self._runner.run(
                     (
@@ -324,14 +325,14 @@ class SourceIngestor:
                 )
                 if (
                     result.returncode != 0
-                    or not await asyncio.to_thread(_valid_jpeg, poster)
+                    or not await run_owned_to_thread(_valid_jpeg, poster)
                 ):
                     raise SourceIngestError("Media poster is invalid")
                 poster_type = "image/jpeg"
             else:
                 if not self._audio_poster.is_file():
                     raise SourceIngestError("Audio poster is unavailable")
-                await asyncio.to_thread(shutil.copyfile, self._audio_poster, poster)
+                await run_owned_to_thread(shutil.copyfile, self._audio_poster, poster)
                 poster_type = "image/png"
             _raise_if_canceled(cancel_check)
             _report(progress, 20)
@@ -614,9 +615,9 @@ class SecureDownloader:
                 suffix = self._SUFFIXES.get(content_type) or mimetypes.guess_extension(content_type) or ".media"
                 final = Path(directory) / f"media{suffix}"
                 part = final.with_name(final.name + ".part")
-                await asyncio.to_thread(final.parent.mkdir, parents=True, exist_ok=True)
+                await run_owned_to_thread(final.parent.mkdir, parents=True, exist_ok=True)
                 received = 0
-                output = await asyncio.to_thread(part.open, "xb")
+                output = await run_owned_to_thread(part.open, "xb")
                 try:
                     async for chunk in _cancelable_chunks(
                         response.iter_bytes(self._max_bytes), cancel_check,
@@ -626,14 +627,14 @@ class SecureDownloader:
                         received += len(chunk)
                         if received > self._max_bytes:
                             raise DownloadError("Remote media exceeds configured limit")
-                        await asyncio.to_thread(output.write, chunk)
+                        await run_owned_to_thread(output.write, chunk)
                         _report(progress, received)
                 finally:
-                    await asyncio.to_thread(output.close)
+                    await run_owned_to_thread(output.close)
                 if received == 0:
                     raise DownloadError("Remote media is empty")
                 _raise_if_canceled(cancel_check)
-                await asyncio.to_thread(part.replace, final)
+                await run_owned_to_thread(part.replace, final)
                 committed = True
                 return final
             raise DownloadError("Too many redirects")
@@ -646,9 +647,9 @@ class SecureDownloader:
                 except (asyncio.TimeoutError, asyncio.CancelledError):
                     pass
             if part is not None:
-                await asyncio.to_thread(part.unlink, missing_ok=True)
+                await run_owned_to_thread(part.unlink, missing_ok=True)
             if not committed and final is not None:
-                await asyncio.to_thread(final.unlink, missing_ok=True)
+                await run_owned_to_thread(final.unlink, missing_ok=True)
 
     async def _public_addresses(
         self, host: str, port: int, cancel_check: CancelCheck,
@@ -1345,7 +1346,7 @@ async def _remove_attempt(attempt: Path, expected: Path, data_dir: Path) -> None
     if candidate != Path(expected).absolute():
         return
     if candidate.is_symlink():
-        await asyncio.to_thread(candidate.unlink, missing_ok=True)
+        await run_owned_to_thread(candidate.unlink, missing_ok=True)
         return
     if _has_symlink_component(candidate, data_dir):
         return
@@ -1357,4 +1358,4 @@ async def _remove_attempt(attempt: Path, expected: Path, data_dir: Path) -> None
     if resolved == root or root not in resolved.parents or resolved != candidate:
         return
     if candidate.is_dir():
-        await asyncio.to_thread(shutil.rmtree, candidate)
+        await run_owned_to_thread(shutil.rmtree, candidate)

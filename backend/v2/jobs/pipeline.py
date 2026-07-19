@@ -9,7 +9,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from ..domain import JobRecord, ProcessingWarning, TranscriptSegmentRecord
-from .models import JobCanceled, TranscriptionFailed
+from .blocking import consume_current_cancellation, owned_to_thread, run_owned_to_thread
+from .models import JobCanceled, PipelinePersistenceError, TranscriptionFailed
 from .source_ingest import _remove_attempt
 
 
@@ -47,10 +48,10 @@ class EpisodePipeline:
         if job.type != "process_episode":
             raise RuntimeError("Unsupported job type")
         self._check_cancel(cancel_check)
-        episode = await asyncio.to_thread(self._episodes.get, job.episode_id)
+        episode = await run_owned_to_thread(self._episodes.get, job.episode_id)
         if episode is None or episode.current_job_id != job.id:
             raise RuntimeError("Episode is unavailable")
-        credentials = await asyncio.to_thread(
+        credentials = await run_owned_to_thread(
             self._profiles.get_revision_credentials,
             job.provider_profile_revision_id,
         )
@@ -77,6 +78,9 @@ class EpisodePipeline:
                 raise ValueError("empty transcription")
             validated_segments = _validate_segments(transcription.segments)
         except (JobCanceled, asyncio.CancelledError):
+            await _remove_attempt(attempt, attempt, self._data_dir)
+            raise
+        except PipelinePersistenceError:
             await _remove_attempt(attempt, attempt, self._data_dir)
             raise
         except Exception:
@@ -131,6 +135,8 @@ class EpisodePipeline:
             )
         except (JobCanceled, asyncio.CancelledError):
             raise
+        except PipelinePersistenceError:
+            raise
         except Exception:
             warnings.append(_warning("optimization"))
 
@@ -143,9 +149,11 @@ class EpisodePipeline:
             )
             await self._stage(
                 job, 82, "Saving summary", cancel_check,
-                asyncio.to_thread(self._episodes.replace_summary, episode.id, summary),
+                run_owned_to_thread(self._episodes.replace_summary, episode.id, summary),
             )
         except (JobCanceled, asyncio.CancelledError):
+            raise
+        except PipelinePersistenceError:
             raise
         except Exception:
             warnings.append(_warning("summary"))
@@ -159,21 +167,28 @@ class EpisodePipeline:
             )
             await self._stage(
                 job, 94, "Saving chapters", cancel_check,
-                asyncio.to_thread(
+                run_owned_to_thread(
                     self._chapters.replace_generated, episode.id, generated
                 ),
             )
         except (JobCanceled, asyncio.CancelledError):
+            raise
+        except PipelinePersistenceError:
             raise
         except Exception:
             warnings.append(_warning("chapters"))
 
         await self._stage(
             job, 95, "Finalizing", cancel_check,
-            asyncio.to_thread(self._episodes.set_warnings, episode.id, warnings),
+            run_owned_to_thread(self._episodes.set_warnings, episode.id, warnings),
         )
         self._check_cancel(cancel_check)
-        await asyncio.to_thread(self._jobs.complete, job.id, self._now())
+        try:
+            await run_owned_to_thread(self._jobs.complete, job.id, self._now())
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise PipelinePersistenceError("Pipeline persistence failed") from None
 
     async def _commit_core_files(
         self, episode_id, job_id, attempt, prepared, cancel_check
@@ -184,8 +199,8 @@ class EpisodePipeline:
             media_staged.resolve().relative_to(attempt.resolve())
         except ValueError:
             copied = attempt / f"committed-source{media_staged.suffix.lower()}"
-            await asyncio.to_thread(copied.parent.mkdir, parents=True, exist_ok=True)
-            await asyncio.to_thread(shutil.copyfile, media_staged, copied)
+            await run_owned_to_thread(copied.parent.mkdir, parents=True, exist_ok=True)
+            await run_owned_to_thread(shutil.copyfile, media_staged, copied)
             media_staged = copied
         artifact_id = uuid4().hex
         final_media = (
@@ -199,14 +214,14 @@ class EpisodePipeline:
         )
         committed: list[Path] = []
         try:
-            canceled, _ = await _owned_to_thread(
+            canceled, _ = await owned_to_thread(
                 self._media.commit_file, media_staged, final_media
             )
             committed.append(final_media)
             if canceled:
                 raise asyncio.CancelledError
             self._check_cancel(cancel_check)
-            canceled, _ = await _owned_to_thread(
+            canceled, _ = await owned_to_thread(
                 self._media.commit_file, poster_staged, final_poster
             )
             committed.append(final_poster)
@@ -225,15 +240,13 @@ class EpisodePipeline:
         self, job, cancel_check, episode_id, records, **metadata
     ) -> tuple[bool, bool]:
         self._check_cancel(cancel_check)
-        await asyncio.to_thread(
-            self._jobs.update_progress,
-            job.id,
-            60,
-            "Saving transcript",
-            self._now(),
+        canceled, _ = await self._update_progress(
+            job.id, 60, "Saving transcript"
         )
+        if canceled:
+            raise asyncio.CancelledError
         operation = asyncio.create_task(
-            asyncio.to_thread(
+            run_owned_to_thread(
                 self._episodes.commit_core_output,
                 episode_id,
                 records,
@@ -252,7 +265,7 @@ class EpisodePipeline:
                 done = False
             except asyncio.CancelledError:
                 task_canceled = True
-                _consume_current_cancellation()
+                consume_current_cancellation()
                 continue
             if cancel_check():
                 user_canceled = True
@@ -283,7 +296,7 @@ class EpisodePipeline:
                 if resolved.is_file():
                     resolved.unlink(missing_ok=True)
 
-        canceled, _ = await _owned_to_thread(remove)
+        canceled, _ = await owned_to_thread(remove)
         if canceled:
             raise asyncio.CancelledError
 
@@ -292,9 +305,7 @@ class EpisodePipeline:
     ):
         try:
             self._check_cancel(cancel_check)
-            canceled, _ = await _owned_to_thread(
-                self._jobs.update_progress, job.id, progress, message, self._now()
-            )
+            canceled, _ = await self._update_progress(job.id, progress, message)
             if canceled:
                 raise asyncio.CancelledError
         except BaseException:
@@ -311,14 +322,12 @@ class EpisodePipeline:
                 )
             except asyncio.CancelledError:
                 task_canceled = True
-                _consume_current_cancellation()
+                consume_current_cancellation()
                 continue
             if done or stage_error is not None:
                 continue
             try:
-                canceled, _ = await _owned_to_thread(
-                    self._jobs.update_progress, job.id, progress, message, self._now()
-                )
+                canceled, _ = await self._update_progress(job.id, progress, message)
                 task_canceled = task_canceled or canceled
             except asyncio.CancelledError:
                 task_canceled = True
@@ -336,6 +345,16 @@ class EpisodePipeline:
             raise stage_error
         self._check_cancel(cancel_check)
         return result
+
+    async def _update_progress(self, job_id: str, progress: int, message: str):
+        try:
+            return await owned_to_thread(
+                self._jobs.update_progress, job_id, progress, message, self._now()
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise PipelinePersistenceError("Pipeline persistence failed") from None
 
     @staticmethod
     def _check_cancel(cancel_check) -> None:
@@ -375,27 +394,3 @@ def _validate_segments(segments):
         )
         previous_end = float(end)
     return validated
-
-
-def _consume_current_cancellation() -> None:
-    current = asyncio.current_task()
-    if current is not None:
-        current.uncancel()
-
-
-async def _owned_to_thread(function, *args):
-    operation = asyncio.create_task(asyncio.to_thread(function, *args))
-    canceled = False
-    while not operation.done():
-        try:
-            await asyncio.shield(operation)
-        except asyncio.CancelledError:
-            canceled = True
-            _consume_current_cancellation()
-    try:
-        result = operation.result()
-    except BaseException:
-        if canceled:
-            raise asyncio.CancelledError from None
-        raise
-    return canceled, result

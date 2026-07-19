@@ -14,6 +14,10 @@ class TranscriptionFailed(RuntimeError):
     """A sanitized core-pipeline transcription failure."""
 
 
+class PipelinePersistenceError(RuntimeError):
+    """A sanitized infrastructure failure from pipeline state persistence."""
+
+
 class JobExecutor(Protocol):
     def execute(
         self, job: JobRecord, cancel_check: Callable[[], bool]
