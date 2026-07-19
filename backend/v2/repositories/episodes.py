@@ -86,6 +86,48 @@ class EpisodeRepository:
                 ],
             )
 
+    def commit_core_output(
+        self,
+        episode_id: str,
+        segments: Iterable[TranscriptSegmentRecord],
+        *,
+        language: str,
+        media_path: str,
+        media_content_type: str,
+        poster_path: str,
+        poster_content_type: str,
+        duration_sec: float,
+        resolution: str | None,
+        updated_at: str,
+    ) -> None:
+        """Atomically switch structured transcript and committed media metadata."""
+        records = list(segments)
+        if any(record.episode_id != episode_id for record in records):
+            raise ValueError("transcript segment belongs to another episode")
+        with self._database.transaction(immediate=True) as conn:
+            _require_episode(conn, episode_id)
+            conn.execute("DELETE FROM transcript_segments WHERE episode_id=?", (episode_id,))
+            conn.executemany(
+                "INSERT INTO transcript_segments"
+                "(id,episode_id,ordinal,start_sec,end_sec,speaker,text) VALUES(?,?,?,?,?,?,?)",
+                [
+                    (row.id, row.episode_id, row.ordinal, row.start_sec, row.end_sec,
+                     row.speaker, row.text)
+                    for row in sorted(records, key=lambda item: (item.ordinal, item.id))
+                ],
+            )
+            changed = conn.execute(
+                "UPDATE episodes SET language=?,media_path=?,media_content_type=?,"
+                "poster_path=?,poster_content_type=?,duration_sec=?,resolution=?,updated_at=? "
+                "WHERE id=?",
+                (
+                    language, media_path, media_content_type, poster_path,
+                    poster_content_type, duration_sec, resolution, updated_at, episode_id,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise KeyError(episode_id)
+
     def get_transcript(self, episode_id: str) -> list[TranscriptSegmentRecord]:
         with self._database.connect() as conn:
             rows = conn.execute(

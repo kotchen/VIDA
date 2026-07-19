@@ -3,8 +3,12 @@ import openai
 import logging
 from typing import Optional
 
-from llm_sanitize import strip_llm_artifacts
-from model_settings import validate_temperature
+if __package__:
+    from .llm_sanitize import strip_llm_artifacts
+    from .model_settings import validate_temperature
+else:
+    from llm_sanitize import strip_llm_artifacts
+    from model_settings import validate_temperature
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +21,8 @@ class Summarizer:
         base_url: str = None,
         model: str = None,
         temperature: float = 0.1,
+        raise_on_error: bool = False,
+        request_timeout_sec: float | None = None,
     ):
         """
         初始化总结器。
@@ -25,6 +31,7 @@ class Summarizer:
         model 指定时会同时作为 fast_model 和 advanced_model 使用。
         """
         self.temperature = validate_temperature(temperature)
+        self.raise_on_error = bool(raise_on_error)
         effective_key = api_key or os.getenv("OPENAI_API_KEY")
         effective_url = base_url or os.getenv("OPENAI_BASE_URL")
 
@@ -33,9 +40,12 @@ class Summarizer:
 
         if effective_key:
             kwargs = {"api_key": effective_key}
+            if request_timeout_sec is not None:
+                kwargs["timeout"] = request_timeout_sec
+                kwargs["max_retries"] = 0
             if effective_url:
                 kwargs["base_url"] = effective_url
-                logger.info(f"OpenAI客户端已初始化，base_url={effective_url}")
+                logger.info("OpenAI客户端已初始化，使用自定义端点")
             else:
                 logger.info("OpenAI客户端已初始化，使用默认端点")
             self.client = openai.OpenAI(**kwargs)
@@ -94,6 +104,8 @@ class Summarizer:
                 return await self._format_single_chunk(preprocessed, detected_lang_code)
 
         except Exception as e:
+            if self.raise_on_error:
+                raise
             logger.error(f"优化转录文本失败: {str(e)}")
             logger.info("返回原始转录文本")
             return raw_transcript

@@ -3,20 +3,35 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI
 from openai import OpenAI
+
+if __package__ == "v2":
+    from transcriber import Transcriber
+else:
+    from ..transcriber import Transcriber
 
 from .config import V2Settings
 from .container import ProviderTestResult, V2Runtime
 from .crypto import CredentialCipher
 from .database import Database
 from .errors import V2Error
-from .domain import JobRecord
 from .jobs.models import JobExecutor
+from .jobs.ai import AIProcessor
+from .jobs.pipeline import EpisodePipeline
+from .jobs.source_ingest import (
+    AsyncioProcessRunner,
+    SecureDownloader,
+    SourceIngestor,
+    YtDlpDownloader,
+)
 from .jobs.scheduler import Scheduler
 from .repositories.episodes import EpisodeRepository
+from .repositories.chapters import ChapterRepository
 from .repositories.jobs import JobRepository
 from .repositories.provider_profiles import ProviderProfileRepository
 from .services.episodes import EpisodeService
@@ -65,11 +80,40 @@ def _build_runtime(
     service = ProviderProfileService(repository, CredentialCipher(settings.master_key))
     job_repository = JobRepository(database)
     episode_repository = EpisodeRepository(database)
+    chapter_repository = ChapterRepository(database)
     episode_service = EpisodeService(
         episode_repository, job_repository, database, settings.data_dir
     )
     media_service = MediaService(settings.data_dir, [episode_repository])
-    job_executor = executor or _UnavailableJobExecutor()
+    if executor is None:
+        process_runner = AsyncioProcessRunner()
+        secure_downloader = SecureDownloader(max_bytes=settings.upload_max_bytes)
+        page_downloader = YtDlpDownloader(
+            process_runner,
+            secure_downloader,
+            secure_downloader,
+            max_bytes=settings.upload_max_bytes,
+        )
+        source_ingestor = SourceIngestor(
+            process_runner,
+            _RoutingDownloader(secure_downloader, page_downloader),
+            data_dir=settings.data_dir,
+            audio_poster=Path(__file__).resolve().parents[2] / "static" / "sipsip.png",
+        )
+        job_executor = EpisodePipeline(
+            data_dir=settings.data_dir,
+            profiles=service,
+            episodes=episode_repository,
+            chapters=chapter_repository,
+            jobs=job_repository,
+            media=media_service,
+            source=source_ingestor,
+            transcriber=Transcriber(),
+            ai_factory=AIProcessor,
+            now=_utc_now,
+        )
+    else:
+        job_executor = executor
     scheduler = Scheduler(
         job_repository,
         job_executor,
@@ -85,15 +129,32 @@ def _build_runtime(
         provider_profile_repository=repository,
         provider_profile_service=service,
         episode_repository=episode_repository,
+        chapter_repository=chapter_repository,
         episode_service=episode_service,
         media_service=media_service,
         provider_tester=test_provider_connection,
     )
 
 
-class _UnavailableJobExecutor:
-    async def execute(self, job: JobRecord, cancel_check) -> None:
-        raise RuntimeError("v2 job executor is not configured")
+class _RoutingDownloader:
+    def __init__(self, direct, page):
+        self._direct = direct
+        self._page = page
+
+    async def download(self, url, directory, cancel_check, progress=None):
+        host = (urlsplit(url).hostname or "").lower().rstrip(".")
+        platform = any(
+            host == allowed or host.endswith("." + allowed)
+            for allowed in YtDlpDownloader._PLATFORM_HOSTS
+        )
+        downloader = self._page if platform else self._direct
+        return await downloader.download(url, directory, cancel_check, progress)
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 async def test_provider_connection(

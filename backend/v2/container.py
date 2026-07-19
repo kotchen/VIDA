@@ -12,6 +12,7 @@ from .errors import install_v2_error_contract
 from .jobs.models import JobExecutor
 from .jobs.scheduler import Scheduler
 from .repositories.episodes import EpisodeRepository
+from .repositories.chapters import ChapterRepository
 from .repositories.jobs import JobRepository
 from .repositories.provider_profiles import ProviderProfileRepository
 from .services.episodes import EpisodeService
@@ -36,6 +37,7 @@ class V2Runtime:
     provider_profile_repository: ProviderProfileRepository | None = None
     provider_profile_service: ProviderProfileService | None = None
     episode_repository: EpisodeRepository | None = None
+    chapter_repository: ChapterRepository | None = None
     episode_service: EpisodeService | None = None
     media_service: MediaService | None = None
     provider_tester: ProviderTester | None = None
@@ -55,6 +57,7 @@ class V2Runtime:
         self.provider_profile_repository = initialized.provider_profile_repository
         self.provider_profile_service = initialized.provider_profile_service
         self.episode_repository = initialized.episode_repository
+        self.chapter_repository = initialized.chapter_repository
         self.episode_service = initialized.episode_service
         self.media_service = initialized.media_service
         if self.provider_tester is None:

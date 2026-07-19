@@ -10,6 +10,10 @@ class JobCanceled(Exception):
     """Signal that a cooperative user cancellation reached a safe boundary."""
 
 
+class TranscriptionFailed(RuntimeError):
+    """A sanitized core-pipeline transcription failure."""
+
+
 class JobExecutor(Protocol):
     def execute(
         self, job: JobRecord, cancel_check: Callable[[], bool]

@@ -214,7 +214,11 @@ class Scheduler:
                 _utc_now(),
             )
         else:
-            await self._repository_call(self._jobs.complete, job.id, _utc_now())
+            current = await self._repository_call(self._jobs.get_required, job.id)
+            if current.status == "processing":
+                await self._repository_call(self._jobs.complete, job.id, _utc_now())
+            elif current.status != "completed":
+                raise RuntimeError("executor returned after a non-success terminal state")
 
     def _cancel_requested(self, job_id: str) -> bool:
         current = self._jobs.get(job_id)
