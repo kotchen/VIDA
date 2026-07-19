@@ -8,6 +8,9 @@ from fastapi import FastAPI
 from .config import V2Settings
 from .database import Database
 from .errors import install_v2_error_contract
+from .jobs.models import JobExecutor
+from .jobs.scheduler import Scheduler
+from .repositories.jobs import JobRepository
 from .repositories.provider_profiles import ProviderProfileRepository
 from .services.provider_profiles import (
     ProviderProfileService,
@@ -23,6 +26,9 @@ ProviderTester = Callable[[ProviderRevisionCredentials], Awaitable[ProviderTestR
 class V2Runtime:
     settings: V2Settings | None = None
     database: Database | None = None
+    job_repository: JobRepository | None = None
+    job_executor: JobExecutor | None = None
+    scheduler: Scheduler | None = None
     provider_profile_repository: ProviderProfileRepository | None = None
     provider_profile_service: ProviderProfileService | None = None
     provider_tester: ProviderTester | None = None
@@ -36,6 +42,9 @@ class V2Runtime:
         initialized = self._initializer()
         self.settings = initialized.settings
         self.database = initialized.database
+        self.job_repository = initialized.job_repository
+        self.job_executor = initialized.job_executor
+        self.scheduler = initialized.scheduler
         self.provider_profile_repository = initialized.provider_profile_repository
         self.provider_profile_service = initialized.provider_profile_service
         if self.provider_tester is None:
@@ -46,10 +55,20 @@ class V2Runtime:
             raise RuntimeError("v2 runtime has not started")
         return self.provider_profile_service
 
+    async def start(self) -> None:
+        self.initialize()
+        if self.scheduler is None:
+            raise RuntimeError("v2 runtime has no scheduler")
+        await self.scheduler.start()
+
+    async def stop(self, grace_period_sec: float = 30.0) -> None:
+        if self.scheduler is not None:
+            await self.scheduler.stop(grace_period_sec)
+
     def install(self, app: FastAPI) -> None:
         from .router import create_v2_router
 
         install_v2_error_contract(app)
         app.include_router(create_v2_router(self), prefix="/api/v2")
-        if self._initializer is not None:
-            app.router.add_event_handler("startup", self.initialize)
+        app.router.add_event_handler("startup", self.start)
+        app.router.add_event_handler("shutdown", self.stop)
