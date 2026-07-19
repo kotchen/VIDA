@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from html import escape as html_escape
 from dataclasses import dataclass
 from urllib.parse import quote
 
@@ -59,15 +60,20 @@ class ExportService:
     ) -> str:
         summary: SummaryRecord | None = self._episodes.get_summary(episode.id)
         chapters: list[ChapterRecord] = self._chapters.list(episode.id)
-        sections = [f"# {_inline(episode.title)}"]
-        sections.append("## Summary\n\n" + ("" if summary is None else summary.content.strip()))
+        sections = [f"# {_markdown_literal(episode.title)}"]
+        sections.append(
+            "## Summary\n\n"
+            + ("" if summary is None else _markdown_literal(summary.content, multiline=True))
+        )
         chapter_lines = "\n".join(
-            f"- [{_clock(row.start_sec)}] {_inline(row.title)}" for row in chapters
+            f"- [{_clock(row.start_sec)}] {_markdown_literal(row.title)}"
+            for row in chapters
         )
         sections.append("## Chapters\n\n" + chapter_lines)
         transcript_lines = "\n\n".join(
-            f"[{_clock(row.start_sec)}] **{_inline(row.speaker or 'Speaker 1')}:** "
-            f"{_inline(row.text)}"
+            f"[{_clock(row.start_sec)}] "
+            f"**{_markdown_literal(row.speaker or 'Speaker 1')}:** "
+            f"{_markdown_literal(row.text)}"
             for row in segments
         )
         sections.append("## Transcript\n\n" + transcript_lines)
@@ -76,6 +82,21 @@ class ExportService:
 
 def _inline(value: str) -> str:
     return " ".join(str(value).replace("\x00", "").split())
+
+
+_MARKDOWN_META = re.compile(r"([\\`*_[\]{}()#!|>~])")
+
+
+def _markdown_literal(value: str, *, multiline: bool = False) -> str:
+    normalized = str(value).replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n")
+    if multiline:
+        normalized = "\n".join(line.rstrip() for line in normalized.strip().split("\n"))
+    else:
+        normalized = " ".join(normalized.split())
+    escaped_html = html_escape(normalized, quote=False)
+    escaped = _MARKDOWN_META.sub(r"\\\1", escaped_html)
+    escaped = re.sub(r"(?m)^(\s*)([-+])(?=\s)", r"\1\\\2", escaped)
+    return re.sub(r"(?m)^(\s*)(\d+)\.(?=\s)", r"\1\2\\.", escaped)
 
 
 def _milliseconds(seconds: float) -> int:

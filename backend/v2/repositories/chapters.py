@@ -61,7 +61,14 @@ class ChapterRepository:
                 thumbnail_path, False, "manual",
             )
             _insert_chapter(conn, chapter, _utc_now())
-        return chapter
+            _recompute_durations(conn, episode_id)
+            duration = conn.execute(
+                "SELECT duration_sec FROM chapters WHERE id=?", (chapter.id,)
+            ).fetchone()[0]
+        return ChapterRecord(
+            chapter.id, chapter.episode_id, chapter.start_sec, chapter.title,
+            duration, chapter.thumbnail_path, chapter.bookmarked, chapter.source,
+        )
 
     def update_manual(
         self,
@@ -92,6 +99,10 @@ class ChapterRepository:
                 "WHERE id=? AND episode_id=? AND source='manual'",
                 (new_start, new_title, duration, chapter_id, episode_id),
             )
+            _recompute_durations(conn, episode_id)
+            duration = conn.execute(
+                "SELECT duration_sec FROM chapters WHERE id=?", (chapter_id,)
+            ).fetchone()[0]
             return ChapterRecord(
                 chapter_id, episode_id, new_start, new_title, duration,
                 row["thumbnail_path"], bool(row["bookmarked"]), "manual",
@@ -112,6 +123,7 @@ class ChapterRepository:
                 "DELETE FROM chapters WHERE id=? AND episode_id=? AND source='manual'",
                 (chapter_id, episode_id),
             )
+            _recompute_durations(conn, episode_id)
 
     def replace_generated(
         self, episode_id: str, chapters: Iterable[ChapterRecord]
@@ -160,6 +172,27 @@ def _duration_to_next_or_end(
     following = conn.execute(query, parameters).fetchone()
     next_start = end if following is None else min(end, following["start_sec"])
     return max(0.0, next_start - start_sec)
+
+
+def _recompute_durations(conn, episode_id: str) -> None:
+    episode = conn.execute(
+        "SELECT duration_sec FROM episodes WHERE id=?", (episode_id,)
+    ).fetchone()
+    if episode is None:
+        raise KeyError(episode_id)
+    episode_end = episode["duration_sec"]
+    if episode_end is None:
+        return
+    rows = conn.execute(
+        "SELECT id,start_sec FROM chapters WHERE episode_id=? ORDER BY start_sec,id",
+        (episode_id,),
+    ).fetchall()
+    for index, row in enumerate(rows):
+        following = rows[index + 1]["start_sec"] if index + 1 < len(rows) else episode_end
+        conn.execute(
+            "UPDATE chapters SET duration_sec=? WHERE id=?",
+            (max(0.0, min(episode_end, following) - row["start_sec"]), row["id"]),
+        )
 
 
 def _insert_chapter(conn, chapter: ChapterRecord, created_at: str) -> None:

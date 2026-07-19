@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from datetime import datetime, timezone
 from email.utils import formatdate, parsedate_to_datetime
@@ -34,6 +35,23 @@ from ..services.media import UnsafeMediaPath
 
 
 JSON_BODY_MAX_BYTES = 16 * 1024
+
+
+class OwnedStreamingResponse(StreamingResponse):
+    """A streaming response that owns its file for the entire ASGI lifecycle."""
+
+    def __init__(self, *args, owner, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._owner = owner
+        self._owner_closed = False
+
+    async def __call__(self, scope, receive, send):
+        try:
+            return await super().__call__(scope, receive, send)
+        finally:
+            if not self._owner_closed:
+                self._owner_closed = True
+                self._owner.close()
 
 
 def create_episode_router(runtime: V2Runtime) -> APIRouter:
@@ -381,14 +399,14 @@ async def _deliver_file(
     except UnsafeMediaPath:
         raise V2Error("media_not_found", "Media file not found", 404, {}) from None
 
-    etag = f'"{opened.mtime_ns:x}-{opened.size:x}"'
-    last_modified = formatdate(opened.mtime, usegmt=True)
-    common_headers = {
-        "Accept-Ranges": "bytes",
-        "ETag": etag,
-        "Last-Modified": last_modified,
-    }
     try:
+        etag = await _strong_etag(opened.file)
+        last_modified = formatdate(opened.mtime, usegmt=True)
+        common_headers = {
+            "Accept-Ranges": "bytes",
+            "ETag": etag,
+            "Last-Modified": last_modified,
+        }
         if _precondition_failed(request, etag, opened.mtime):
             opened.close()
             raise V2Error(
@@ -425,23 +443,21 @@ async def _deliver_file(
 
         async def chunks():
             remaining = length
-            try:
-                await asyncio.to_thread(opened.file.seek, start)
-                while remaining:
-                    if await request.is_disconnected():
-                        break
-                    chunk = await asyncio.to_thread(
-                        opened.file.read, min(64 * 1024, remaining)
-                    )
-                    if not chunk:
-                        break
-                    remaining -= len(chunk)
-                    yield chunk
-            finally:
-                opened.close()
+            await asyncio.to_thread(opened.file.seek, start)
+            while remaining:
+                if await request.is_disconnected():
+                    break
+                chunk = await asyncio.to_thread(
+                    opened.file.read, min(64 * 1024, remaining)
+                )
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
 
-        return StreamingResponse(
-            chunks(), status_code=206 if partial else 200, headers=headers
+        return OwnedStreamingResponse(
+            chunks(), owner=opened,
+            status_code=206 if partial else 200, headers=headers
         )
     except BaseException:
         if not opened.file.closed:
@@ -450,7 +466,7 @@ async def _deliver_file(
 
 
 def _parse_single_range(value: str, size: int) -> tuple[int, int]:
-    if size <= 0 or not value.startswith("bytes=") or "," in value:
+    if size <= 0 or not value.lower().startswith("bytes=") or "," in value:
         raise ValueError("invalid range")
     spec = value[6:].strip()
     if not spec or "-" not in spec:
@@ -470,6 +486,19 @@ def _parse_single_range(value: str, size: int) -> tuple[int, int]:
     if end < start:
         raise ValueError("invalid range")
     return start, end
+
+
+async def _strong_etag(file) -> str:
+    position = await asyncio.to_thread(file.tell)
+    digest = hashlib.sha256()
+    await asyncio.to_thread(file.seek, 0)
+    while True:
+        chunk = await asyncio.to_thread(file.read, 64 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    await asyncio.to_thread(file.seek, position)
+    return f'"sha256-{digest.hexdigest()}"'
 
 
 def _not_modified(request: Request, etag: str, mtime: float) -> bool:

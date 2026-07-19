@@ -76,6 +76,47 @@ class ExportApiTests(unittest.TestCase):
         self.assertIn("## Chapters\n\n- [00:00:00] Intro", text)
         self.assertIn("## Transcript\n\n[00:00:00] **Alice:** =formula", text)
 
+    def test_markdown_renders_all_user_content_as_literal_text(self):
+        with self.runtime.database.transaction() as conn:
+            conn.execute(
+                "UPDATE episodes SET title=? WHERE id=?",
+                ("# [link](https://evil) <script> `code` | table &lt;", self.episode_id),
+            )
+        self.runtime.episode_repository.replace_summary(
+            self.episode_id,
+            SummaryRecord(
+                self.episode_id,
+                "## heading\n<img src=x onerror=alert(1)> **bold** &amp;",
+                1, 2, 90, "VIDA",
+            ),
+        )
+        self.runtime.chapter_repository.replace_generated(self.episode_id, [
+            ChapterRecord(
+                "c1", self.episode_id, 0, "![image](x) | *chapter*", 65.125,
+                None, False, "generated",
+            )
+        ])
+        self.runtime.episode_repository.replace_transcript(self.episode_id, [
+            TranscriptSegmentRecord(
+                "s1", self.episode_id, 0, 0, 2.5, "<b>Speaker</b>",
+                "[click](javascript:alert(1)) `tick` <iframe>",
+            )
+        ])
+
+        text = self.export("md").content.decode("utf-8")
+
+        for dangerous in (
+            "<script>", "<img", "<b>", "<iframe>",
+            "[link](https://evil)", "![image](x)",
+            "[click](javascript:alert(1))", "**bold**", "`tick`",
+        ):
+            self.assertNotIn(dangerous, text)
+        self.assertIn(r"\# \[link\]\(https://evil\) &lt;script&gt; \`code\` \| table &amp;lt;", text)
+        self.assertIn(r"\#\# heading", text)
+        self.assertIn(r"&lt;img src=x onerror=alert\(1\)&gt; \*\*bold\*\* &amp;amp;", text)
+        self.assertIn(r"\!\[image\]\(x\) \| \*chapter\*", text)
+        self.assertIn(r"&lt;b&gt;Speaker&lt;/b&gt;", text)
+
     def test_unknown_format_and_missing_episode_use_v2_envelopes(self):
         invalid = self.export("pdf")
         missing = self.client.get("/api/v2/episodes/missing/export?format=txt")

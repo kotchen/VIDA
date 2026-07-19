@@ -115,6 +115,42 @@ class ChapterApiTests(unittest.TestCase):
         self.assertEqual([row["startSec"] for row in listed], [10, 20, 30, 40, 50])
         self.assertEqual([row["durationSec"] for row in listed], [10, 10, 10, 10, 50])
 
+    def test_create_update_delete_persist_neighbor_duration_changes(self):
+        first = self.client.post(
+            f"/api/v2/episodes/{self.episode_id}/chapters",
+            json={"startSec": 10, "title": "First"},
+        ).json()
+        second = self.client.post(
+            f"/api/v2/episodes/{self.episode_id}/chapters",
+            json={"startSec": 20, "title": "Second"},
+        ).json()
+        self.assertEqual(self._stored_durations(), {
+            first["id"]: 10, second["id"]: 30, "generated": 50,
+        })
+
+        self.client.patch(
+            f"/api/v2/episodes/{self.episode_id}/chapters/{second['id']}",
+            json={"startSec": 70},
+        )
+        self.assertEqual(self._stored_durations(), {
+            first["id"]: 40, "generated": 20, second["id"]: 30,
+        })
+
+        self.client.delete(
+            f"/api/v2/episodes/{self.episode_id}/chapters/{second['id']}"
+        )
+        self.assertEqual(self._stored_durations(), {
+            first["id"]: 40, "generated": 50,
+        })
+
+    def _stored_durations(self):
+        with self.runtime.database.connect() as conn:
+            rows = conn.execute(
+                "SELECT id,duration_sec FROM chapters WHERE episode_id=?",
+                (self.episode_id,),
+            ).fetchall()
+        return {row["id"]: row["duration_sec"] for row in rows}
+
 
 if __name__ == "__main__":
     unittest.main()
