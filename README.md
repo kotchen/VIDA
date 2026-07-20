@@ -55,7 +55,7 @@ cd AI-Video-Transcriber
 
 # Using Docker Compose (easiest)
 cp .env.example .env
-# Edit .env file if you want server-side defaults (optional)
+# Generate VIDA_PROFILE_MASTER_KEY as described below and put it in .env
 docker-compose up -d
 
 # Or using Docker directly
@@ -114,6 +114,24 @@ python3 start.py --prod
 ```
 
 This keeps the SSE connection stable throughout long tasks (30–60+ min).
+
+#### VIDA 2.0 production settings
+
+VIDA 2.0 uses a persistent SQLite FIFO queue and encrypted Provider Profiles. Generate a master key once, store it in `.env` or your secret manager, and keep it stable across restarts:
+
+```bash
+python3 -c "import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
+```
+
+```dotenv
+V2_MAX_CONCURRENT_JOBS=2
+V2_UPLOAD_MAX_GB=5
+VIDA_PROFILE_MASTER_KEY=<generated URL-safe Base64 value>
+```
+
+Run exactly **one FastAPI/Uvicorn process** in production; do not add Uvicorn workers. `V2_MAX_CONCURRENT_JOBS` controls the in-process queue worker count. `V2_UPLOAD_MAX_GB` is the v2 streaming-upload limit and is separate from the 1.x `UPLOAD_MAX_MB` setting.
+
+Back up the complete `data/v2/` directory together with the master key. Losing `VIDA_PROFILE_MASTER_KEY` makes all stored Provider credentials unrecoverable; VIDA deliberately never falls back to plaintext credentials. Keep the key outside the data directory, logs, shell history, and source control.
 
 #### Run with explicit env (example)
 
@@ -191,6 +209,9 @@ AI-Video-Transcriber/
 | `PORT` | Server port | `8000` | No |
 | `WHISPER_MODEL_SIZE` | Whisper model size | `base` | No |
 | `UPLOAD_MAX_MB` | Maximum upload size for local files (MB) | `200` | No |
+| `V2_MAX_CONCURRENT_JOBS` | VIDA 2.0 persistent queue worker count; positive integer | `2` | No |
+| `V2_UPLOAD_MAX_GB` | VIDA 2.0 streaming upload limit (GiB); positive integer | `5` | No |
+| `VIDA_PROFILE_MASTER_KEY` | URL-safe Base64 encoding of exactly 32 random bytes | - | **Yes for VIDA 2.0** |
 
 An optional dedicated endpoint `POST /api/process-upload` exists with the same behavior as sending `file` to `/api/process-video`.
 

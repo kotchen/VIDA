@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+@theme {
+  --color-page: #120B05;
+  --color-sidebar: #110802;
+  --color-card: #1F140A;
+  --color-raised: #2A1609;
+  --color-warm: #46301E;
+  --color-copper-300: #D09050;
+  --color-copper-500: #B07030;
+  --color-copper-700: #905020;
+  --color-gold: #C28D51;
+  --color-cream: #F3E9DA;
+  --color-muted-warm: #A68B70;
+  --color-success: #7BA05B;
+  --color-on-copper: #1A0E04;
+
+  --font-display: "DM Serif Display", Georgia, serif;
+  --font-sans: "Manrope", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* shadcn/ui 语义变量（new-york, cssVariables 模式） */
+:root {
+  --background: #120B05;
+  --foreground: #F3E9DA;
+  --card: #1F140A;
+  --card-foreground: #F3E9DA;
+  --popover: #2A1609;
+  --popover-foreground: #F3E9DA;
+  --primary: #B07030;
+  --primary-foreground: #120B05;
+  --secondary: #2A1609;
+  --secondary-foreground: #F3E9DA;
+  --muted: #2A1609;
+  --muted-foreground: #A68B70;
+  --accent: #2A1609;
+  --accent-foreground: #F3E9DA;
+  --destructive: #A04030;
+  --destructive-foreground: #F3E9DA;
+  --border: #46301E;
+  --input: #46301E;
+  --ring: #B07030;
+  --radius: 1rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+body {
+  background-color: var(--color-page);
+  color: var(--color-cream);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 铜金渐变（主按钮 / 徽标 / 导航激活态） */
+.bg-copper-gradient {
+  background-image: linear-gradient(135deg, #905020 0%, #D09050 100%);
+}
+
+/* 金色渐变文字（Logo / 面板标题） */
+.text-gold-gradient {
+  background-image: linear-gradient(135deg, #E8C284 0%, #C28D51 45%, #905020 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* 卡片：暖棕细描边 + 极轻内发光 */
+.card-glow {
+  box-shadow:
+    inset 0 1px 0 0 rgba(208, 144, 80, 0.08),
+    0 0 0 1px rgba(70, 48, 30, 0.6);
+}
+
+/* 等宽数字（时间戳 / 时长） */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}

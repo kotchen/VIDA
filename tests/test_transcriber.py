@@ -11,6 +11,36 @@ from unittest.mock import patch
 
 
 class TranscriberAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_markdown_keeps_headings_timestamps_and_language(self):
+        fake_faster_whisper = types.ModuleType("faster_whisper")
+        fake_faster_whisper.WhisperModel = object
+        with patch.dict(sys.modules, {"faster_whisper": fake_faster_whisper}):
+            sys.modules.pop("backend.transcriber", None)
+            module = importlib.import_module("backend.transcriber")
+
+        class Model:
+            def transcribe(self, *args, **kwargs):
+                segments = [types.SimpleNamespace(start=1.2, end=65.9, text=" Hello ")]
+                info = types.SimpleNamespace(language="en", language_probability=0.876)
+                return iter(segments), info
+
+        transcriber = module.Transcriber()
+        transcriber.model = Model()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio = Path(temp_dir) / "audio.wav"
+            audio.write_bytes(b"audio")
+            result = await transcriber.transcribe(str(audio))
+
+        self.assertEqual(
+            result,
+            "# Video Transcription\n\n"
+            "**Detected Language:** en\n"
+            "**Language Probability:** 0.88\n\n"
+            "## Transcription Content\n\n"
+            "**[00:01 - 01:05]**\n\nHello\n",
+        )
+        self.assertEqual(transcriber.get_detected_language(), "en")
+
     async def test_model_initialization_does_not_block_event_loop(self):
         fake_faster_whisper = types.ModuleType("faster_whisper")
         fake_faster_whisper.WhisperModel = object
