@@ -20,6 +20,9 @@ except Exception:
 class StartupOptions:
     production_mode: bool
     port: int
+    max_concurrent_jobs: int
+    v2_upload_max_gb: int
+    profile_master_key: str
 
 
 def parse_startup_options(argv=None, environ=None):
@@ -31,11 +34,24 @@ def parse_startup_options(argv=None, environ=None):
     parser = argparse.ArgumentParser(description="Start AI Video Transcriber")
     parser.add_argument("--prod", action="store_true", help="Disable hot reload")
     parser.add_argument("--port", type=int, help="Server port")
+    parser.add_argument("--max-concurrent-jobs", type=int)
+    parser.add_argument("--profile-master-key")
     args = parser.parse_args(argv)
 
     return StartupOptions(
         production_mode=args.prod or environ.get("PRODUCTION_MODE") == "true",
         port=args.port if args.port is not None else int(environ.get("PORT", 8000)),
+        max_concurrent_jobs=(
+            args.max_concurrent_jobs
+            if args.max_concurrent_jobs is not None
+            else int(environ.get("V2_MAX_CONCURRENT_JOBS", 2))
+        ),
+        v2_upload_max_gb=int(environ.get("V2_UPLOAD_MAX_GB", 5)),
+        profile_master_key=(
+            args.profile_master_key
+            if args.profile_master_key is not None
+            else environ.get("VIDA_PROFILE_MASTER_KEY", "")
+        ),
     )
 
 
@@ -176,14 +192,19 @@ def main():
         cmd = [
             sys.executable, "-m", "uvicorn", "main:app",
             "--host", host,
-            "--port", str(port)
+            "--port", str(port),
+            "--no-access-log",
         ]
         
         # 只在开发模式下启用热重载
         if not production_mode:
             cmd.append("--reload")
         
-        subprocess.run(cmd, env=os.environ.copy())
+        child_environ = os.environ.copy()
+        child_environ["V2_MAX_CONCURRENT_JOBS"] = str(options.max_concurrent_jobs)
+        child_environ["V2_UPLOAD_MAX_GB"] = str(options.v2_upload_max_gb)
+        child_environ["VIDA_PROFILE_MASTER_KEY"] = options.profile_master_key
+        subprocess.run(cmd, env=child_environ)
         
     except KeyboardInterrupt:
         print("\n\n👋 服务已停止")

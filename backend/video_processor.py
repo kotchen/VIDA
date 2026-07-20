@@ -9,6 +9,11 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+if __package__:
+    from .logging_safety import log_exception, safe_url_origin
+else:
+    from logging_safety import log_exception, safe_url_origin
+
 logger = logging.getLogger(__name__)
 
 class VideoProcessor:
@@ -108,7 +113,7 @@ class VideoProcessor:
             auto_langs = [k for k in auto_caps if not k.startswith("live_chat")]
 
             if not manual_langs and not auto_langs:
-                logger.info(f"视频无可用字幕: {url}")
+                logger.info("视频无可用字幕: source=%s", safe_url_origin(url))
                 return None, video_title, None
 
             # 优先手动字幕，其次自动字幕
@@ -122,8 +127,9 @@ class VideoProcessor:
                 candidate_langs[0],
             )
             logger.info(
-                f"发现{'手动' if prefer_manual else '自动'}字幕，选用语言: {prefer_lang}"
-                f"（候选 {len(candidate_langs)} 种）"
+                "发现%s字幕（候选 %d 种）",
+                "手动" if prefer_manual else "自动",
+                len(candidate_langs),
             )
 
             # 2. 仅下载字幕，跳过音视频
@@ -166,11 +172,13 @@ class VideoProcessor:
 
             # 5. 格式化为与 Whisper 输出兼容的 Markdown
             formatted = self._format_subtitle_entries(entries, file_lang)
-            logger.info(f"字幕获取成功: lang={file_lang}, {len(entries)} 条目")
+            logger.info("字幕获取成功: %d 条目", len(entries))
             return formatted, video_title, file_lang
 
         except Exception as e:
-            logger.warning(f"字幕获取失败（将回退至音频下载）: {e}")
+            log_exception(
+                logger, logging.WARNING, "字幕获取失败（将回退至音频下载）", e
+            )
             return None, None, None
         finally:
             if sub_dir.exists():
@@ -196,7 +204,7 @@ class VideoProcessor:
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
         except Exception as e:
-            logger.error(f"读取 VTT 文件失败: {e}")
+            log_exception(logger, logging.ERROR, "读取 VTT 文件失败", e)
             return []
 
         # 移除 WEBVTT 文件头，按空行分割 cue 块
@@ -280,7 +288,7 @@ class VideoProcessor:
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
         except Exception as e:
-            logger.error(f"读取 SRT 文件失败: {e}")
+            log_exception(logger, logging.ERROR, "读取 SRT 文件失败", e)
             return []
 
         blocks = re.split(r"\n{2,}", content.strip())
@@ -369,7 +377,7 @@ class VideoProcessor:
             ydl_opts = self.ydl_opts.copy()
             ydl_opts['outtmpl'] = output_template
             
-            logger.info(f"开始下载视频: {url}")
+            logger.info("开始下载视频: source=%s", safe_url_origin(url))
             
             import asyncio
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -377,13 +385,13 @@ class VideoProcessor:
                     # 标题和时长已在 fetch_subtitles 中获取，直接下载，跳过重复探测
                     video_title = prefetched_title
                     expected_duration = 0
-                    logger.info(f"复用预取标题，跳过 extract_info: {video_title}")
+                    logger.info("复用预取标题，跳过 extract_info")
                 else:
                     # 获取视频信息（放到线程池避免阻塞事件循环）
                     info = await asyncio.to_thread(ydl.extract_info, url, False)
                     video_title = info.get('title', 'unknown')
                     expected_duration = info.get('duration') or 0
-                    logger.info(f"视频标题: {video_title}")
+                    logger.info("视频信息获取成功")
                 
                 # 下载视频（放到线程池避免阻塞事件循环）
                 await asyncio.to_thread(ydl.download, [url])
@@ -425,13 +433,13 @@ class VideoProcessor:
                     actual_duration2 = float(out2) if out2 else 0.0
                     logger.info(f"重封装完成，新时长≈{actual_duration2:.2f}s")
                 except Exception as e:
-                    logger.error(f"重封装失败：{e}")
+                    log_exception(logger, logging.ERROR, "重封装失败", e)
             
             logger.info(f"音频文件已保存: {audio_file}")
             return audio_file, video_title
             
         except Exception as e:
-            logger.error(f"下载视频失败: {str(e)}")
+            log_exception(logger, logging.ERROR, "下载视频失败", e)
             raise Exception(f"下载视频失败: {str(e)}")
     
     def get_video_info(self, url: str) -> dict:
@@ -456,5 +464,5 @@ class VideoProcessor:
                     'view_count': info.get('view_count', 0),
                 }
         except Exception as e:
-            logger.error(f"获取视频信息失败: {str(e)}")
+            log_exception(logger, logging.ERROR, "获取视频信息失败", e)
             raise Exception(f"获取视频信息失败: {str(e)}")

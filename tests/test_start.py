@@ -1,12 +1,44 @@
+import base64
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 import start
 
 
 class StartupOptionsTests(unittest.TestCase):
+    def test_uvicorn_access_log_is_disabled_to_avoid_query_secret_leaks(self):
+        options = start.StartupOptions(False, 8000, 2, 5, "master-key")
+        with (
+            patch.object(start, "parse_startup_options", return_value=options),
+            patch.object(start, "configure_ffmpeg_path"),
+            patch.object(start, "check_dependencies", return_value=True),
+            patch.object(start, "check_ffmpeg", return_value=True),
+            patch.object(start, "setup_environment", return_value=True),
+            patch.object(start.os, "chdir"),
+            patch.object(start.subprocess, "run") as run,
+        ):
+            start.main()
+
+        command = run.call_args.args[0]
+        self.assertIn("--no-access-log", command)
+
+    def test_v2_cli_values_override_environment(self):
+        key = base64.urlsafe_b64encode(b"k" * 32).decode("ascii")
+        options = start.parse_startup_options(
+            ["--max-concurrent-jobs", "3", "--profile-master-key", key],
+            {
+                "V2_MAX_CONCURRENT_JOBS": "2",
+                "V2_UPLOAD_MAX_GB": "7",
+                "VIDA_PROFILE_MASTER_KEY": "environment-key",
+            },
+        )
+        self.assertEqual(options.max_concurrent_jobs, 3)
+        self.assertEqual(options.v2_upload_max_gb, 7)
+        self.assertEqual(options.profile_master_key, key)
+
     def test_cli_port_overrides_environment_port(self):
         options = start.parse_startup_options(
             ["--port", "8001"],
