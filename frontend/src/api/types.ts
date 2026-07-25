@@ -116,6 +116,22 @@ export interface ProviderConnectionTest {
   message: string
 }
 
+export interface ProviderModelDiscoveryInput {
+  profileId?: string
+  baseUrl: string
+  apiKey?: string
+}
+
+export interface ProviderModelOption {
+  id: string
+  name: string
+}
+
+export interface ProviderModelDiscovery {
+  models: ProviderModelOption[]
+  latencyMs: number
+}
+
 export interface EpisodeUrlSubmissionInput {
   sourceUrl: string
   providerProfileId: string

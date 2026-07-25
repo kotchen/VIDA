@@ -1,6 +1,8 @@
 import { apiRequest } from "@/api/client"
 import type {
   ProviderConnectionTest,
+  ProviderModelDiscovery,
+  ProviderModelDiscoveryInput,
   ProviderProfile,
   ProviderProfileCreateInput,
   ProviderProfileUpdateInput,
@@ -41,6 +43,17 @@ export const profilesApi = {
   test(id: string): Promise<ProviderConnectionTest> {
     return apiRequest(`/api/v2/provider-profiles/${segment(id)}/test`, {
       method: "POST",
+    })
+  },
+
+  discoverModels(
+    input: ProviderModelDiscoveryInput,
+    signal?: AbortSignal,
+  ): Promise<ProviderModelDiscovery> {
+    return apiRequest("/api/v2/provider-profiles/models", {
+      method: "POST",
+      body: input,
+      signal,
     })
   },
 }

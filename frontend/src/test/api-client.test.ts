@@ -128,6 +128,36 @@ describe("apiBlob", () => {
 })
 
 describe("domain API paths", () => {
+  it("posts draft credentials to provider model discovery", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      Response.json({ models: [], latencyMs: 12 }),
+    )
+    vi.stubGlobal("fetch", fetchMock)
+    const controller = new AbortController()
+
+    await profilesApi.discoverModels(
+      {
+        profileId: "profile-1",
+        baseUrl: "https://api.example/v1",
+        apiKey: "draft-secret",
+      },
+      controller.signal,
+    )
+
+    const [path, request] = fetchMock.mock.calls[0] as [
+      string,
+      RequestInit,
+    ]
+    expect(path).toBe("/api/v2/provider-profiles/models")
+    expect(request.method).toBe("POST")
+    expect(request.signal).toBe(controller.signal)
+    expect(request.body).toBe(JSON.stringify({
+      profileId: "profile-1",
+      baseUrl: "https://api.example/v1",
+      apiKey: "draft-secret",
+    }))
+  })
+
   it("encodes every dynamic path segment", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
     vi.stubGlobal("fetch", fetchMock)
