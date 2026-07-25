@@ -104,11 +104,10 @@ def _build_runtime(
         media_service,
     )
     if executor is None:
+        _disable_yt_dlp_plugins()
         process_runner = AsyncioProcessRunner()
         secure_downloader = SecureDownloader(max_bytes=settings.upload_max_bytes)
         page_downloader = YtDlpDownloader(
-            process_runner,
-            secure_downloader,
             secure_downloader,
             max_bytes=settings.upload_max_bytes,
         )
@@ -154,6 +153,12 @@ def _build_runtime(
         provider_tester=test_provider_connection,
         provider_model_fetcher=fetch_provider_models,
     )
+
+
+def _disable_yt_dlp_plugins() -> None:
+    from yt_dlp.globals import plugin_dirs
+
+    plugin_dirs.value = []
 
 
 class _RoutingDownloader:
