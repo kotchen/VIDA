@@ -692,7 +692,8 @@ class SSRFProxy:
         self._cancel_check = cancel_check
         self._timeouts = timeouts or TimeoutPolicy()
         self._max_tunnel_bytes = max_tunnel_bytes
-        self._token = secrets.token_urlsafe(24)
+        self._username = secrets.token_urlsafe(24)
+        self._password = secrets.token_urlsafe(24)
         self._server = None
         self._handlers: set[asyncio.Task] = set()
         self._closing = False
@@ -704,7 +705,9 @@ class SSRFProxy:
             self._on_client, "127.0.0.1", 0, limit=32 * 1024
         )
         port = self._server.sockets[0].getsockname()[1]
-        self.proxy_url = f"http://{self._token}:@127.0.0.1:{port}"
+        self.proxy_url = (
+            f"http://{self._username}:{self._password}@127.0.0.1:{port}"
+        )
         return self
 
     async def __aexit__(self, *args):
@@ -793,7 +796,9 @@ class SSRFProxy:
             )
             if len(header) > 32 * 1024:
                 raise DownloadError("Proxy request headers are too large")
-            host, port = _parse_connect_request(header, self._token)
+            host, port = _parse_connect_request(
+                header, self._username, self._password
+            )
             upstream_reader, upstream = await self.connect_target(
                 host, port, self._cancel_check
             )
@@ -929,7 +934,9 @@ _CONNECT_LINE = re.compile(rb"CONNECT ([^ ]+) HTTP/(1\.[01])\Z")
 _DNS_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
 
 
-def _parse_connect_request(header: bytes, token: str) -> tuple[str, int]:
+def _parse_connect_request(
+    header: bytes, username: str, password: str
+) -> tuple[str, int]:
     if len(header) > 32 * 1024 or not header.endswith(b"\r\n\r\n"):
         raise DownloadError("Proxy request is invalid")
     if b"\x00" in header or b"\n" in header.replace(b"\r\n", b""):
@@ -956,8 +963,12 @@ def _parse_connect_request(header: bytes, token: str) -> tuple[str, int]:
         if any(byte < 32 and byte != 9 or byte == 127 for byte in value):
             raise DownloadError("Proxy request is invalid")
         fields[key] = value
-    expected = b"Basic " + base64.b64encode(f"{token}:".encode("ascii"))
-    if fields.get(b"proxy-authorization") != expected:
+    expected = b"Basic " + base64.b64encode(
+        f"{username}:{password}".encode("ascii")
+    )
+    if not secrets.compare_digest(
+        fields.get(b"proxy-authorization", b""), expected
+    ):
         raise DownloadError("Proxy authentication failed")
     return _split_connect_authority(authority)
 

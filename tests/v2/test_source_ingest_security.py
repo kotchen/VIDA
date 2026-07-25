@@ -361,8 +361,11 @@ class ControlledProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(writer.joined)
 
     def test_connect_authority_and_headers_are_strict(self):
-        valid_token = "token"
-        auth = base64.b64encode(b"token:").decode()
+        username = "user-token"
+        password = "password-token"
+        auth = base64.b64encode(
+            f"{username}:{password}".encode()
+        ).decode()
         for authority, expected in (
             ("example.com:443", ("example.com", 443)),
             ("[2606:4700:4700::1111]:443", ("2606:4700:4700::1111", 443)),
@@ -371,7 +374,12 @@ class ControlledProxyTests(unittest.IsolatedAsyncioTestCase):
                 f"CONNECT {authority} HTTP/1.1\r\n"
                 f"Proxy-Authorization: Basic {auth}\r\nHost: {authority}\r\n\r\n"
             ).encode()
-            self.assertEqual(source_ingest._parse_connect_request(request, valid_token), expected)
+            self.assertEqual(
+                source_ingest._parse_connect_request(
+                    request, username, password
+                ),
+                expected,
+            )
         malformed = (
             "example.com", "example.com:8443", "example.com:443/path",
             "example.com:443?x", "user@example.com:443", "2001:db8::1:443",
@@ -382,7 +390,8 @@ class ControlledProxyTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(authority=authority), self.assertRaises(DownloadError):
                 source_ingest._parse_connect_request(
                     f"CONNECT {authority} HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\n".encode(),
-                    valid_token,
+                    username,
+                    password,
                 )
         malformed_requests = (
             f"GET example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\n",
@@ -394,7 +403,24 @@ class ControlledProxyTests(unittest.IsolatedAsyncioTestCase):
         )
         for request in malformed_requests:
             with self.subTest(request=request), self.assertRaises(DownloadError):
-                source_ingest._parse_connect_request(request.encode(), valid_token)
+                source_ingest._parse_connect_request(
+                    request.encode(), username, password
+                )
+
+        wrong_auth = base64.b64encode(b"user-token:wrong").decode()
+        with self.assertRaisesRegex(
+            DownloadError, "authentication"
+        ) as raised:
+            source_ingest._parse_connect_request(
+                (
+                    "CONNECT example.com:443 HTTP/1.1\r\n"
+                    f"Proxy-Authorization: Basic {wrong_auth}\r\n\r\n"
+                ).encode(),
+                username,
+                password,
+            )
+        self.assertNotIn(username, str(raised.exception))
+        self.assertNotIn(password, str(raised.exception))
 
     async def test_real_loopback_rejects_auth_and_shutdown_joins_active_handler(self):
         class UpstreamWriter:
@@ -427,6 +453,8 @@ class ControlledProxyTests(unittest.IsolatedAsyncioTestCase):
         )
         await proxy.__aenter__()
         parsed = __import__("urllib.parse", fromlist=["urlsplit"]).urlsplit(proxy.proxy_url)
+        self.assertTrue(parsed.username)
+        self.assertTrue(parsed.password)
         reader, writer = await asyncio.open_connection("127.0.0.1", parsed.port)
         writer.write(b"CONNECT example.com:443 HTTP/1.1\r\n\r\n")
         await writer.drain()
@@ -436,8 +464,23 @@ class ControlledProxyTests(unittest.IsolatedAsyncioTestCase):
         writer.close()
         await asyncio.wait_for(writer.wait_closed(), 1)
 
-        token = parsed.username
-        auth = base64.b64encode(f"{token}:".encode()).decode()
+        wrong_auth = base64.b64encode(
+            f"{parsed.username}:wrong".encode()
+        ).decode()
+        reader, writer = await asyncio.open_connection("127.0.0.1", parsed.port)
+        writer.write(
+            f"CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {wrong_auth}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        self.assertIn(
+            b"403", await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 1)
+        )
+        writer.close()
+        await asyncio.wait_for(writer.wait_closed(), 1)
+
+        auth = base64.b64encode(
+            f"{parsed.username}:{parsed.password}".encode()
+        ).decode()
         reader, writer = await asyncio.open_connection("127.0.0.1", parsed.port)
         writer.write(
             f"CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\n".encode()
