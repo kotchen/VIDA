@@ -12,6 +12,7 @@ import secrets
 import shutil
 import socket
 import ssl
+import yt_dlp
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -856,22 +857,22 @@ class YtDlpDownloader:
 
     def __init__(
         self,
-        runner: ProcessRunner,
-        media_downloader: Downloader,
         page_validator: URLValidator,
         *,
         max_bytes: int = 5 * 1024**3,
         timeout_sec: float = 120.0,
         proxy_factory=None,
+        youtube_dl_factory=None,
+        thread_runner=run_owned_to_thread,
     ):
-        self._runner = runner
-        self._media = media_downloader
         self._validator = page_validator
         self._max_bytes = max_bytes
         self._timeout = timeout_sec
         self._proxy_factory = proxy_factory or (
             lambda cancel_check: SSRFProxy(cancel_check=cancel_check)
         )
+        self._youtube_dl_factory = youtube_dl_factory or yt_dlp.YoutubeDL
+        self._thread_runner = thread_runner
 
     async def download(
         self, url: str, directory: Path, cancel_check: CancelCheck,
@@ -882,31 +883,94 @@ class YtDlpDownloader:
         if not any(host == allowed or host.endswith("." + allowed) for allowed in self._PLATFORM_HOSTS):
             raise DownloadError("Unsupported page URL")
         await self._validator.validate_url(url, cancel_check)
-        async with self._proxy_factory(cancel_check) as proxy:
-            result = await self._runner.run(
-                (
-                    "yt-dlp", "--no-config", "--no-plugin-dirs", "--no-playlist",
-                    "--skip-download", "--dump-single-json", "--no-warnings",
-                    "--socket-timeout", "15", "--max-filesize", str(self._max_bytes),
-                    "--proxy", proxy.proxy_url, "--", url,
-                ),
-                cancel_check,
-                timeout_sec=self._timeout,
-                env=_clean_subprocess_env(),
-            )
-        if result.returncode != 0:
-            raise DownloadError("Unable to resolve media page")
+        target = Path(directory)
+        await self._thread_runner(target.mkdir, parents=True, exist_ok=True)
         try:
-            document = json.loads(result.stdout)
-            media_url = document["url"]
-            if not isinstance(media_url, str):
-                raise TypeError
-        except (json.JSONDecodeError, KeyError, TypeError):
-            raise DownloadError("Unable to resolve media page") from None
-        _validated_remote_url(media_url)
-        return await self._media.download(
-            media_url, directory, cancel_check, progress
-        )
+            async with self._proxy_factory(cancel_check) as proxy:
+                await self._thread_runner(
+                    self._download_sync,
+                    url,
+                    target,
+                    proxy.proxy_url,
+                    cancel_check,
+                    progress,
+                )
+            return await self._thread_runner(
+                self._validate_single_output, target
+            )
+        except (JobCanceled, asyncio.CancelledError):
+            await self._thread_runner(_remove_directory_contents, target)
+            raise
+        except Exception:
+            await self._thread_runner(_remove_directory_contents, target)
+            raise DownloadError("Unable to download media page") from None
+
+    def _download_sync(
+        self,
+        url: str,
+        directory: Path,
+        proxy_url: str,
+        cancel_check: CancelCheck,
+        progress: ProgressCallback | None,
+    ) -> None:
+        def progress_hook(state) -> None:
+            if cancel_check():
+                raise JobCanceled
+            if progress is None or state.get("status") != "downloading":
+                return
+            downloaded = state.get("downloaded_bytes")
+            if isinstance(downloaded, (int, float)) and math.isfinite(downloaded):
+                progress(max(0, min(self._max_bytes, int(downloaded))))
+
+        options = {
+            "format": "bestaudio/best",
+            "outtmpl": str(directory / "media.%(ext)s"),
+            "proxy": proxy_url,
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "cachedir": False,
+            "socket_timeout": min(15.0, self._timeout),
+            "max_filesize": self._max_bytes,
+            "retries": 1,
+            "fragment_retries": 1,
+            "extractor_retries": 1,
+            "overwrites": False,
+            "progress_hooks": [progress_hook],
+        }
+        with self._youtube_dl_factory(options) as downloader:
+            downloader.extract_info(url, download=True)
+
+    def _validate_single_output(self, directory: Path) -> Path:
+        root = directory.resolve()
+        children = list(directory.iterdir())
+        if len(children) != 1:
+            raise DownloadError("Media download output is invalid")
+        output = children[0]
+        if (
+            output.is_symlink()
+            or not output.is_file()
+            or output.suffix.lower() not in _SAFE_INPUTS
+            or output.stat().st_size > self._max_bytes
+        ):
+            raise DownloadError("Media download output is invalid")
+        resolved = output.resolve()
+        if resolved.parent != root:
+            raise DownloadError("Media download output is invalid")
+        return resolved
+
+
+def _remove_directory_contents(directory: Path) -> None:
+    if not directory.exists():
+        return
+    for child in directory.iterdir():
+        try:
+            if child.is_symlink() or not child.is_dir():
+                child.unlink()
+            else:
+                shutil.rmtree(child)
+        except FileNotFoundError:
+            pass
 
 
 def _validated_remote_url(url: str):
