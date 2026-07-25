@@ -7,9 +7,9 @@ import project1 from "../assets/project-1.png"
 import project2 from "../assets/project-2.png"
 import project3 from "../assets/project-3.png"
 import project4 from "../assets/project-4.png"
-import type { DashboardData } from "./types"
+import type { DashboardData } from "@/api/types"
 
-export const mockDashboard: DashboardData = {
+export const mockDashboard = {
   currentEpisode: {
     id: "ep-12",
     title: "AI Podcast Episode 12",
@@ -21,6 +21,11 @@ export const mockDashboard: DashboardData = {
     status: "completed",
     language: "en",
     createdAt: "2024-05-16T09:00:00Z",
+    progress: 100,
+    message: "Completed",
+    queuePosition: null,
+    providerProfileId: "profile-primary",
+    warnings: [],
   },
   summary: {
     episodeId: "ep-12",
@@ -53,4 +58,4 @@ export const mockDashboard: DashboardData = {
     { id: "ep-10", title: "Customer Interview #7", createdAt: "2024-05-10T09:00:00Z", durationSec: 1351, status: "completed", thumbnailUrl: project3 },
     { id: "ep-9", title: "Design Sprint Debrief", createdAt: "2024-05-08T09:00:00Z", durationSec: 2469, status: "processing", thumbnailUrl: project4 },
   ],
-}
+} satisfies DashboardData
