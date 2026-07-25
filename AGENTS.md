@@ -90,6 +90,11 @@ set +a
 python start.py --prod
 ```
 
+- 必须先执行 `source venv/bin/activate`，不能用 `venv/bin/python start.py --prod` 代替。后者虽然会
+  使用虚拟环境中的 Python 包，但不会把 `venv/bin` 加入子进程的 `PATH`；URL 采集任务调用
+  `yt-dlp` 时会因找不到可执行文件而在 5% 进度失败。
+- 启动后可用 `command -v python` 和 `command -v yt-dlp` 检查两者是否都指向当前仓库的
+  `venv/bin/`。
 - 后端端口：`8000`；
 - `--prod` 会关闭热重载，适合长任务和稳定 SSE 连接；
 - 本地需要调试 Python 热重载时可去掉 `--prod`；

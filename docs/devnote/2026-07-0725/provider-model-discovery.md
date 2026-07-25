@@ -44,6 +44,15 @@
 - 已知限制：自动化测试使用受控的 OpenAI-compatible mock，没有使用真实第三方 Provider 凭据
   进行联网验证；不同 Provider 对 `/models` 的兼容程度仍取决于其实现。
 
+### 1.4 URL 任务启动环境排查
+
+- 合并后运行态发现 Bilibili URL Episode 在 5% 进度快速失败，数据库只记录脱敏后的
+  `job_execution_failed`。
+- 根因是后端通过 `venv/bin/python start.py --prod` 启动时没有激活虚拟环境：Python 包可以
+  导入，但子进程 `PATH` 中没有 `venv/bin`，因此找不到已经安装的 `yt-dlp`。
+- 根目录 `AGENTS.md` 已明确要求先执行 `source venv/bin/activate`，并补充 Python 与
+  `yt-dlp` 路径检查方式。
+
 ## 2. 学习与可沉淀经验
 
 ### 2.1 草稿配置与持久配置应共用一个受控服务端入口
@@ -67,6 +76,12 @@ Provider 的模型列表可能因权限、区域、兼容实现或临时故障�
 
 第三方响应可能包含重复、空白、非字符串或异常长 ID。后端在返回给 UI 前统一清洗、排序并设置数量
 上限，可以简化前端状态，同时控制异常响应带来的内存和渲染成本。
+
+### 2.5 使用虚拟环境 Python 不等于激活虚拟环境
+
+直接运行 `venv/bin/python` 只决定当前 Python 解释器，不会自动修改进程的 `PATH`。当应用后续通过
+命令名启动 `yt-dlp`、`ffmpeg` 等工具时，仍依赖启动 shell 的 PATH。包含 Python 包和配套 CLI 的
+项目，应按文档激活虚拟环境后再启动，并在运行态验证关键可执行文件的解析路径。
 
 ## 3. 回滚操作
 
@@ -121,3 +136,8 @@ npm run build
 curl --fail http://127.0.0.1:8000/api/v2/dashboard
 curl --fail http://127.0.0.1:7100/v2/
 ```
+
+### 3.5 只回滚启动文档说明
+
+本次启动排查没有修改数据库、API 或任务实现。如果只需撤销 `AGENTS.md` 与本 devnote 中新增的
+启动说明，恢复对应文档即可；不要回滚 Provider 模型发现功能提交，也不需要处理 migration。
