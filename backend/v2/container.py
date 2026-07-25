@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from .config import V2Settings
 from .database import Database
 from .errors import install_v2_error_contract
+from .events import V2EventBroker
 from .jobs.models import JobExecutor
 from .jobs.scheduler import Scheduler
 from .repositories.episodes import EpisodeRepository
@@ -33,6 +34,7 @@ ProviderTester = Callable[[ProviderRevisionCredentials], Awaitable[ProviderTestR
 
 @dataclass
 class V2Runtime:
+    events: V2EventBroker = field(default_factory=V2EventBroker)
     settings: V2Settings | None = None
     database: Database | None = None
     job_repository: JobRepository | None = None
