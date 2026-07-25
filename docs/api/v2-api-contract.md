@@ -154,6 +154,7 @@ GET /api/v2/provider-profiles
 GET /api/v2/provider-profiles/{id}
 PATCH /api/v2/provider-profiles/{id}
 DELETE /api/v2/provider-profiles/{id}
+POST /api/v2/provider-profiles/models
 POST /api/v2/provider-profiles/{id}/test
 ```
 
@@ -190,6 +191,52 @@ POST /api/v2/provider-profiles/{id}/test
 PATCH 至少包含一个非 null 字段。省略 `apiKey` 会沿用旧凭据；空字符串不能用于清空。每次有效更新创建不可变的新 revision，已入队 Job 继续使用其提交时固定的 `providerProfileRevisionId`。DELETE 返回 204 并逻辑删除 Profile；它不影响历史或已入队 Job，但新提交不能再引用它。列表和详情不返回已删除 Profile。
 
 连接测试成功返回 `{ "ok": true, "latencyMs": 15, "modelAvailable": true, "message": "Connection successful" }`；上游原始响应、请求头、密钥和查询参数不会透传。
+
+### 模型发现
+
+Profile 创建或更新前可使用草稿凭据发现 OpenAI-compatible Provider 的模型：
+
+```http
+POST /api/v2/provider-profiles/models
+Content-Type: application/json
+```
+
+```json
+{
+  "profileId": "optional-existing-profile-id",
+  "baseUrl": "https://api.example/v1",
+  "apiKey": "optional-draft-api-key"
+}
+```
+
+`baseUrl` 必填且必须是 HTTP(S) URL。新建模式必须提供 `apiKey`；编辑模式提供
+`profileId` 后可省略 `apiKey`，服务端会使用该 Profile active revision 的已加密保存密钥。
+同时提供两者时，草稿 `apiKey` 优先。即使使用已保存密钥，`baseUrl` 仍取本次请求值，
+便于保存前测试新地址。未知字段、空 API Key，或同时缺少 `profileId`/`apiKey` 返回
+422 `validation_error`；不存在或已删除的 Profile 返回 404
+`provider_profile_not_found`。
+
+成功响应：
+
+```json
+{
+  "models": [
+    {
+      "id": "model-a",
+      "name": "Model A"
+    }
+  ],
+  "latencyMs": 24
+}
+```
+
+模型按 ID 去重并做大小写不敏感排序；空 ID、超过 512 字符的 ID/名称被忽略，
+名称缺失时使用 ID，最多返回 2000 个唯一模型。上游请求总超时为 15 秒。
+模型发现不保存 Base URL、API Key 或结果，也不创建 Profile revision。
+
+连接失败、鉴权失败、超时或上游响应异常统一返回 502
+`provider_models_fetch_failed`。响应和日志不会包含 API Key、完整 URL query、上游响应
+body、header 或原始 SDK 异常。
 
 ## Episode 提交、列表和读取
 
@@ -329,7 +376,7 @@ GET /api/v2/episodes/{id}/export?format=txt|srt|md
 | 416 | `range_not_satisfiable` |
 | 422 | `provider_profile_inactive`, `validation_error` |
 | 500 | `internal_error` |
-| 502 | `provider_connection_failed` |
+| 502 | `provider_connection_failed`, `provider_models_fetch_failed` |
 
 未知异常仅在服务端记录 traceback；客户端只收到通用 `internal_error` 与 request ID。错误、日志和数据库中的上游消息必须先清洗。
 
