@@ -19,7 +19,11 @@ export function ChaptersCard({ chapters }: { chapters: Chapter[] }) {
         <ol className="flex flex-col gap-2 pr-3">
           {chapters.map((ch) => (
             <li key={ch.id} className="flex items-center gap-3 rounded-xl bg-raised/60 p-2">
-              <img src={ch.thumbnailUrl} alt="" className="size-11 shrink-0 rounded-lg object-cover" />
+              {ch.thumbnailUrl ? (
+                <img src={ch.thumbnailUrl} alt="" className="size-11 shrink-0 rounded-lg object-cover" />
+              ) : (
+                <span className="size-11 shrink-0 rounded-lg bg-warm/40" />
+              )}
               <span className="tnum w-11 shrink-0 text-xs text-copper-300">{formatSeconds(ch.startSec)}</span>
               <span className="min-w-0 flex-1 truncate text-sm">{ch.title}</span>
               <span className="tnum shrink-0 text-xs text-muted-warm">{formatSeconds(ch.durationSec)}</span>

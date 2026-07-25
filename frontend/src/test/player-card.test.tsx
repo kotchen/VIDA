@@ -10,6 +10,10 @@ describe("PlayerCard", () => {
     expect(screen.getByText("57:42")).toBeInTheDocument()
     expect(screen.getByText("1080p")).toBeInTheDocument()
     expect(screen.getByText("Completed")).toBeInTheDocument()
-    expect(screen.getByText("00:00 / 57:42")).toBeInTheDocument()
+    expect(screen.getByTitle("AI Podcast Episode 12")).toHaveAttribute(
+      "src",
+      "/api/v2/episodes/ep-12/media",
+    )
+    expect(screen.getByTitle("AI Podcast Episode 12")).toHaveAttribute("controls")
   })
 })

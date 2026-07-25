@@ -26,7 +26,13 @@ export function DashboardPage() {
         <UploadCard />
       </div>
       <div className="col-span-4 min-h-0">
-        <PlayerCard episode={data.currentEpisode} />
+        {data.currentEpisode ? (
+          <PlayerCard episode={data.currentEpisode} />
+        ) : (
+          <div className="card-glow flex h-full items-center justify-center rounded-2xl bg-card text-sm text-muted-warm">
+            No completed Episode yet.
+          </div>
+        )}
       </div>
       <div className="col-span-4 min-h-0">
         <SummaryCard summary={data.summary} />

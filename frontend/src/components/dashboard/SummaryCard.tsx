@@ -1,9 +1,29 @@
 import { Clock, Gauge, ListChecks, Sparkles } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Card } from "@/components/ui/card"
-import type { Summary } from "@/data/types"
+import type { Summary } from "@/api/types"
+import { Button } from "@/components/ui/button"
 
-export function SummaryCard({ summary }: { summary: Summary }) {
+export function SummaryCard({
+  summary,
+  loading = false,
+  onRegenerate,
+}: {
+  summary: Summary | null
+  loading?: boolean
+  onRegenerate?: () => void
+}) {
+  if (loading) {
+    return <Card className="card-glow p-4 text-muted-warm">Loading summary…</Card>
+  }
+  if (summary === null) {
+    return (
+      <Card className="card-glow p-4">
+        <p className="text-muted-warm">Summary is not available yet.</p>
+        {onRegenerate ? <Button onClick={onRegenerate}>Generate summary</Button> : null}
+      </Card>
+    )
+  }
   const stats = [
     { icon: Clock, value: `${summary.readTimeMin} min`, label: "Read time" },
     { icon: ListChecks, value: String(summary.keyPoints), label: "Key points" },

@@ -14,7 +14,7 @@ export const mockDashboard = {
     id: "ep-12",
     title: "AI Podcast Episode 12",
     sourceType: "upload",
-    mediaUrl: "",
+    mediaUrl: "/api/v2/episodes/ep-12/media",
     posterUrl: posterEpisode,
     durationSec: 3462,
     resolution: "1080p",
