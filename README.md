@@ -103,6 +103,15 @@ python3 start.py
 
 After the service starts, open your browser and visit `http://localhost:8000`
 
+- Legacy UI: `http://localhost:8000/`
+- VIDA 2.0: `http://localhost:8000/v2/`
+- Vite development: `http://localhost:7100/v2/` (proxies `/api` to port 8000)
+
+VIDA 2.0 production uses one FastAPI/Uvicorn process; concurrency is provided by
+the internal persistent job workers. Back up `data/v2/` together with
+`VIDA_PROFILE_MASTER_KEY` as one recovery unit. A reverse proxy must disable
+buffering for `/api/v2/events` and allow long-lived SSE connections.
+
 Use `--port` to choose another port, for example `python3 start.py --port 8001`.
 
 #### Production Mode (Recommended for long videos)

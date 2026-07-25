@@ -102,6 +102,14 @@ python3 start.py
 
 服务启动后，打开浏览器访问 `http://localhost:8000`
 
+- 旧版 UI：`http://localhost:8000/`
+- VIDA 2.0：`http://localhost:8000/v2/`
+- Vite 开发：`http://localhost:7100/v2/`（将 `/api` 代理到 8000 端口）
+
+VIDA 2.0 生产环境只运行一个 FastAPI/Uvicorn 进程，并发由内部持久化 Job worker
+提供。必须将 `data/v2/` 与 `VIDA_PROFILE_MASTER_KEY` 作为同一个恢复单元备份。
+反向代理需要对 `/api/v2/events` 关闭缓冲并允许长连接 SSE。
+
 #### 生产模式（推荐用于长视频）
 
 为了避免在处理长视频时SSE连接断开，建议使用生产模式启动（禁用热重载）：

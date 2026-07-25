@@ -26,6 +26,8 @@ services:
       # 1.x history can optionally be persisted separately:
       # - ./temp:/app/temp
     restart: unless-stopped
+    # Keep one application process: SSE delivery is process-local and job
+    # concurrency is controlled by V2_MAX_CONCURRENT_JOBS.
     
     # 资源限制（可选）
     deploy:
