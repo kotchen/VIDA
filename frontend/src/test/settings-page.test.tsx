@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { SettingsPage } from "@/pages/SettingsPage"
@@ -16,6 +16,7 @@ vi.mock("@/api/profiles", () => ({
     update: vi.fn(),
     delete: vi.fn(),
     test: vi.fn(),
+    discoverModels: vi.fn(),
   },
 }))
 
@@ -50,41 +51,20 @@ describe("SettingsPage", () => {
       modelAvailable: true,
       message: "Connection successful",
     })
+    vi.mocked(profilesApi.discoverModels).mockReset().mockResolvedValue({
+      models: [
+        { id: "model-1", name: "Model One" },
+        { id: "model-2", name: "Model Two" },
+      ],
+      latencyMs: 18,
+    })
   })
 
-  it("renders profiles and creates a complete profile", async () => {
+  it("renders existing provider profiles", async () => {
     render(<SettingsPage />)
     expect(await screen.findByText("Primary")).toBeInTheDocument()
     expect(screen.getByText("••••cret")).toBeInTheDocument()
     expect(screen.getByText("Revision 3")).toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole("button", { name: "New profile" }))
-    fireEvent.change(screen.getByLabelText("Name"), {
-      target: { value: "Secondary" },
-    })
-    fireEvent.change(screen.getByLabelText("Base URL"), {
-      target: { value: "https://second.example/v1" },
-    })
-    fireEvent.change(screen.getByLabelText("API key"), {
-      target: { value: "secret-key" },
-    })
-    fireEvent.change(screen.getByLabelText("Model ID"), {
-      target: { value: "model-2" },
-    })
-    fireEvent.change(screen.getByLabelText("Temperature"), {
-      target: { value: "0.4" },
-    })
-    fireEvent.click(screen.getByRole("button", { name: "Create profile" }))
-
-    await waitFor(() =>
-      expect(profilesApi.create).toHaveBeenCalledWith({
-        name: "Secondary",
-        baseUrl: "https://second.example/v1",
-        apiKey: "secret-key",
-        modelId: "model-2",
-        temperature: 0.4,
-      }),
-    )
   })
 
   it("edits without sending an empty API key and tests connection", async () => {
@@ -107,6 +87,119 @@ describe("SettingsPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Test Primary" }))
     expect(await screen.findByText(/Connection successful.*18 ms/)).toBeInTheDocument()
+  })
+
+  it("auto-fetches models and submits the selected model", async () => {
+    render(<SettingsPage />)
+    await screen.findByText("Primary")
+    vi.useFakeTimers()
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "New profile" }))
+      fireEvent.change(screen.getByLabelText("Name"), {
+        target: { value: "Secondary" },
+      })
+      fireEvent.change(screen.getByLabelText("Base URL"), {
+        target: { value: "https://second.example/v1" },
+      })
+      fireEvent.change(screen.getByLabelText("API key"), {
+        target: { value: "secret-key" },
+      })
+
+      await act(async () => vi.advanceTimersByTimeAsync(900))
+
+      expect(profilesApi.discoverModels).toHaveBeenCalledWith(
+        {
+          baseUrl: "https://second.example/v1",
+          apiKey: "secret-key",
+        },
+        expect.any(AbortSignal),
+      )
+      expect(screen.getByText("Loaded 2 models · 18 ms")).toBeInTheDocument()
+      fireEvent.change(screen.getByRole("combobox", { name: "Model ID" }), {
+        target: { value: "model-2" },
+      })
+      fireEvent.click(screen.getByRole("button", { name: "Create profile" }))
+
+      await act(async () => Promise.resolve())
+      expect(profilesApi.create).toHaveBeenCalledWith({
+        name: "Secondary",
+        baseUrl: "https://second.example/v1",
+        apiKey: "secret-key",
+        modelId: "model-2",
+        temperature: 0.1,
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("fetches immediately from the manual button and disables it while loading", async () => {
+    let resolveDiscovery:
+      | ((value: {
+          models: { id: string; name: string }[]
+          latencyMs: number
+        }) => void)
+      | undefined
+    vi.mocked(profilesApi.discoverModels).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveDiscovery = resolve
+      }),
+    )
+    render(<SettingsPage />)
+    await screen.findByText("Primary")
+    fireEvent.click(screen.getByRole("button", { name: "New profile" }))
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "https://second.example/v1" },
+    })
+    fireEvent.change(screen.getByLabelText("API key"), {
+      target: { value: "secret-key" },
+    })
+
+    const fetchButton = screen.getByRole("button", { name: "Fetch models" })
+    fireEvent.click(fetchButton)
+
+    expect(profilesApi.discoverModels).toHaveBeenCalledTimes(1)
+    expect(fetchButton).toBeDisabled()
+    expect(screen.getByText("Fetching models…")).toBeInTheDocument()
+    await act(async () => {
+      resolveDiscovery?.({
+        models: [{ id: "model-2", name: "Model Two" }],
+        latencyMs: 9,
+      })
+    })
+    expect(fetchButton).toBeEnabled()
+  })
+
+  it("reuses saved credentials and preserves a current missing model", async () => {
+    vi.mocked(profilesApi.discoverModels).mockResolvedValueOnce({
+      models: [{ id: "model-2", name: "Model Two" }],
+      latencyMs: 7,
+    })
+    render(<SettingsPage />)
+    await screen.findByText("Primary")
+    vi.useFakeTimers()
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Edit Primary" }))
+      await act(async () => vi.advanceTimersByTimeAsync(900))
+
+      expect(profilesApi.discoverModels).toHaveBeenCalledWith(
+        {
+          profileId: "profile-1",
+          baseUrl: "https://api.example/v1",
+        },
+        expect.any(AbortSignal),
+      )
+      expect(
+        screen.getByRole("option", {
+          name: "Current: model-1 — not returned by provider",
+        }),
+      ).toBeInTheDocument()
+      expect(screen.getByRole("combobox", { name: "Model ID" })).toHaveValue(
+        "model-1",
+      )
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("requires explicit delete confirmation and clears selected preference", async () => {
