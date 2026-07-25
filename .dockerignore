@@ -33,6 +33,7 @@ Thumbs.db
 *.png
 *.jpg
 *.gif
+!frontend/src/assets/*.png
 
 # Docker相关
 Dockerfile

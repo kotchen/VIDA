@@ -1,3 +1,11 @@
+FROM node:22-bookworm-slim AS frontend-build
+
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
 # AI视频转录器 Docker镜像 — Python 与本地推荐环境对齐（3.12），依赖与 requirements.txt 一致
 FROM python:3.12-slim-bookworm
 
@@ -19,6 +27,7 @@ RUN python -m pip install --upgrade pip setuptools wheel \
 
 # 复制项目文件
 COPY . .
+COPY --from=frontend-build /frontend/dist /app/frontend/dist
 
 # 创建临时目录
 RUN mkdir -p temp

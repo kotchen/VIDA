@@ -21,6 +21,7 @@ if __package__:
     from .logging_safety import disable_sensitive_dependency_logs, log_exception
     from .model_settings import validate_temperature
     from .v2.bootstrap import install_v2
+    from .v2.services.frontend import install_v2_frontend
 else:
     from video_processor import VideoProcessor
     from transcriber import Transcriber
@@ -29,6 +30,7 @@ else:
     from logging_safety import disable_sensitive_dependency_logs, log_exception
     from model_settings import validate_temperature
     from v2.bootstrap import install_v2
+    from v2.services.frontend import install_v2_frontend
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -1045,6 +1047,8 @@ async def get_active_tasks():
         "processing_urls": processing_count,
         "task_ids": list(active_tasks.keys())
     }
+
+install_v2_frontend(app, PROJECT_ROOT / "frontend" / "dist")
 
 if __name__ == "__main__":
     import uvicorn

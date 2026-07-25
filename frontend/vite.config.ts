@@ -5,11 +5,16 @@ import tailwindcss from "@tailwindcss/vite"
 import { defineConfig } from "vite"
 
 export default defineConfig({
+  base: "/v2/",
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
   },
-  server: { port: 7100, host: true },
+  server: {
+    port: 7100,
+    host: true,
+    proxy: { "/api": "http://127.0.0.1:8000" },
+  },
   test: {
     environment: "jsdom",
     globals: true,
