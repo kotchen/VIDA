@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.v2.bootstrap import build_test_runtime
+from backend.v2.bootstrap import build_test_runtime, fetch_provider_models
 from backend.v2.bootstrap import test_provider_connection as run_provider_connection_test
 from backend.v2.errors import V2Error
 from backend.v2.services.provider_profiles import ProviderRevisionCredentials
@@ -282,6 +282,79 @@ class ProviderConnectionTesterTests(unittest.IsolatedAsyncioTestCase):
         client.models = SimpleNamespace(list=Mock(return_value=response))
         client.close = Mock()
         return client
+
+
+class ProviderModelFetcherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_normalizes_models_and_closes_client(self):
+        client = ProviderConnectionTesterTests.fake_client(
+            SimpleNamespace(
+                data=[
+                    SimpleNamespace(id="z-model", name="Zed"),
+                    SimpleNamespace(id="A-model", name=""),
+                    SimpleNamespace(id="z-model", name="Duplicate"),
+                    SimpleNamespace(id="  ", name="Blank"),
+                    SimpleNamespace(id="x" * 513, name="Too long"),
+                ]
+            )
+        )
+        calls = []
+
+        async def run_in_thread(function):
+            calls.append(function)
+            return function()
+
+        with (
+            patch("backend.v2.bootstrap.OpenAI", return_value=client) as openai_cls,
+            patch("backend.v2.bootstrap.asyncio.to_thread", side_effect=run_in_thread),
+            patch(
+                "backend.v2.bootstrap.time",
+                new=SimpleNamespace(monotonic=Mock(side_effect=[10.0, 10.125])),
+            ),
+        ):
+            result = await fetch_provider_models(
+                "https://api.example/v1", "secret-key"
+            )
+
+        self.assertEqual(
+            result,
+            ([("A-model", "A-model"), ("z-model", "Zed")], 125),
+        )
+        openai_cls.assert_called_once_with(
+            api_key="secret-key",
+            base_url="https://api.example/v1",
+            timeout=15.0,
+        )
+        self.assertEqual(calls, [client.models.list, client.close])
+
+    async def test_caps_normalized_models_at_two_thousand(self):
+        client = ProviderConnectionTesterTests.fake_client(
+            SimpleNamespace(
+                data=[
+                    SimpleNamespace(id=f"model-{index:04d}", name=f"Model {index}")
+                    for index in range(2001)
+                ]
+            )
+        )
+        with patch("backend.v2.bootstrap.OpenAI", return_value=client):
+            models, _ = await fetch_provider_models(
+                "https://api.example/v1", "secret-key"
+            )
+
+        self.assertEqual(len(models), 2000)
+        self.assertEqual(models[0], ("model-0000", "Model 0"))
+        self.assertEqual(models[-1], ("model-1999", "Model 1999"))
+
+    async def test_list_failure_still_closes_client(self):
+        client = ProviderConnectionTesterTests.fake_client()
+        client.models.list.side_effect = RuntimeError("provider unavailable")
+
+        with patch("backend.v2.bootstrap.OpenAI", return_value=client):
+            with self.assertRaises(RuntimeError):
+                await fetch_provider_models(
+                    "https://api.example/v1", "secret-key"
+                )
+
+        client.close.assert_called_once_with()
 
 
 if __name__ == "__main__":

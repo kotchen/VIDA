@@ -16,7 +16,7 @@ else:
     from ..transcriber import Transcriber
 
 from .config import V2Settings
-from .container import ProviderTestResult, V2Runtime
+from .container import ProviderModelFetchResult, ProviderTestResult, V2Runtime
 from .crypto import CredentialCipher
 from .database import Database
 from .errors import V2Error
@@ -152,6 +152,7 @@ def _build_runtime(
         episode_service=episode_service,
         media_service=media_service,
         provider_tester=test_provider_connection,
+        provider_model_fetcher=fetch_provider_models,
     )
 
 
@@ -201,3 +202,39 @@ async def test_provider_connection(
         else "Connection successful, but configured model was not found"
     )
     return True, latency_ms, available, message
+
+
+async def fetch_provider_models(
+    base_url: str,
+    api_key: str,
+) -> ProviderModelFetchResult:
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=15.0)
+    try:
+        started = time.monotonic()
+        response = await asyncio.to_thread(client.models.list)
+        latency_ms = max(0, round((time.monotonic() - started) * 1000))
+        models = _normalize_provider_models(response.data)
+    finally:
+        await asyncio.to_thread(client.close)
+    return models, latency_ms
+
+
+def _normalize_provider_models(rows) -> list[tuple[str, str]]:
+    unique: dict[str, tuple[str, str]] = {}
+    for row in rows:
+        model_id = getattr(row, "id", None)
+        if not isinstance(model_id, str):
+            continue
+        model_id = model_id.strip()
+        if not model_id or len(model_id) > 512 or model_id in unique:
+            continue
+        raw_name = getattr(row, "name", None)
+        name = raw_name.strip() if isinstance(raw_name, str) else ""
+        if not name:
+            name = model_id
+        if len(name) > 512:
+            continue
+        unique[model_id] = (model_id, name)
+        if len(unique) == 2000:
+            break
+    return sorted(unique.values(), key=lambda item: (item[0].casefold(), item[0]))

@@ -30,6 +30,12 @@ logger = logging.getLogger(__name__)
 
 ProviderTestResult = tuple[bool, int, bool, str]
 ProviderTester = Callable[[ProviderRevisionCredentials], Awaitable[ProviderTestResult]]
+ProviderModelOption = tuple[str, str]
+ProviderModelFetchResult = tuple[list[ProviderModelOption], int]
+ProviderModelFetcher = Callable[
+    [str, str],
+    Awaitable[ProviderModelFetchResult],
+]
 
 
 @dataclass
@@ -47,6 +53,7 @@ class V2Runtime:
     episode_service: EpisodeService | None = None
     media_service: MediaService | None = None
     provider_tester: ProviderTester | None = None
+    provider_model_fetcher: ProviderModelFetcher | None = None
     _initializer: Callable[[], "V2Runtime"] | None = field(default=None, repr=False)
 
     def initialize(self) -> None:
@@ -69,6 +76,8 @@ class V2Runtime:
         self.media_service = initialized.media_service
         if self.provider_tester is None:
             self.provider_tester = initialized.provider_tester
+        if self.provider_model_fetcher is None:
+            self.provider_model_fetcher = initialized.provider_model_fetcher
 
     def require_provider_profiles(self) -> ProviderProfileService:
         if self.provider_profile_service is None:
