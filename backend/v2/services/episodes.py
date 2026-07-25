@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 from collections.abc import AsyncIterable
@@ -25,6 +26,10 @@ from ..events import EventPublisher, ignore_event
 from ..repositories.episodes import EpisodeRepository
 from ..repositories.jobs import JobRepository
 from ..repositories.chapters import ChapterRepository
+from .media import MediaService
+
+
+logger = logging.getLogger(__name__)
 
 
 UPLOAD_CHUNK_BYTES = 1024 * 1024
@@ -83,6 +88,7 @@ class EpisodeService:
         data_dir: Path | None = None,
         chapters: ChapterRepository | None = None,
         publish: EventPublisher = ignore_event,
+        media: MediaService | None = None,
     ):
         self._repository = repository
         self._jobs = jobs
@@ -90,12 +96,36 @@ class EpisodeService:
         self._data_dir = None if data_dir is None else Path(data_dir)
         self._chapters = chapters
         self._publish = publish
+        self._media = media
 
     def get_episode(self, episode_id: str) -> EpisodeRecord:
         episode = self._repository.get(episode_id)
         if episode is None:
             raise _episode_not_found()
         return episode
+
+    def delete_episode(self, episode_id: str) -> None:
+        try:
+            self._repository.delete_terminal(episode_id)
+        except KeyError:
+            raise _episode_not_found() from None
+        except InvalidJobState:
+            raise V2Error(
+                "invalid_episode_state",
+                "Active Episode must be canceled before deletion",
+                409,
+                {},
+            ) from None
+        if self._media is not None:
+            try:
+                self._media.remove_episode_tree(episode_id)
+            except Exception as exc:
+                logger.warning(
+                    "Episode file cleanup deferred error_type=%s",
+                    type(exc).__name__,
+                )
+        self._publish("episode.deleted", {"episodeId": episode_id})
+        self._publish("dashboard.invalidated", {})
 
     def list_projects(self, limit: int = 12, offset: int = 0) -> list[EpisodeRecord]:
         return self._repository.list_projects(limit, offset)

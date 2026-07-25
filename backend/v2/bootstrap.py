@@ -93,6 +93,7 @@ def _build_runtime(
     job_repository = JobRepository(database, event_broker.publish)
     episode_repository = EpisodeRepository(database)
     chapter_repository = ChapterRepository(database)
+    media_service = MediaService(settings.data_dir, [episode_repository])
     episode_service = EpisodeService(
         episode_repository,
         job_repository,
@@ -100,8 +101,8 @@ def _build_runtime(
         settings.data_dir,
         chapter_repository,
         event_broker.publish,
+        media_service,
     )
-    media_service = MediaService(settings.data_dir, [episode_repository])
     if executor is None:
         process_runner = AsyncioProcessRunner()
         secure_downloader = SecureDownloader(max_bytes=settings.upload_max_bytes)

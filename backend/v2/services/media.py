@@ -53,6 +53,23 @@ class MediaService:
         destination.parent.mkdir(parents=True, exist_ok=True)
         source.replace(destination)
 
+    def remove_episode_tree(self, episode_id: str) -> None:
+        relative = Path(episode_id)
+        if (
+            relative.is_absolute()
+            or len(relative.parts) != 1
+            or relative.name in {"", ".", ".."}
+            or ":" in relative.name
+            or "\x00" in relative.name
+        ):
+            raise UnsafeMediaPath("invalid episode id")
+        episodes_root = self._data_dir / "episodes"
+        candidate = episodes_root / relative.name
+        if candidate.is_symlink() or self._has_symlink_component(candidate):
+            raise UnsafeMediaPath("episode tree contains a symlink")
+        if candidate.exists():
+            self._remove_tree(candidate)
+
     def open_owned_file(
         self, episode_id: str, stored_path: str | None, kind: str
     ) -> OpenMediaFile:

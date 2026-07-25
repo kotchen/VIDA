@@ -149,6 +149,35 @@ class EventPublicationTests(unittest.IsolatedAsyncioTestCase):
             ["job.updated", "dashboard.invalidated"],
         )
 
+    async def test_episode_delete_publishes_deleted_then_dashboard_invalidation(self):
+        profile = self.runtime.require_provider_profiles().create_profile(
+            "Primary", "https://api.test/v1", "secret-value", "model", 0.1
+        )
+        submission = self.runtime.require_episodes().submit_url(
+            "https://media.test/one", profile.id, "en", "Episode"
+        )
+        with self.runtime.database.transaction(immediate=True) as conn:
+            conn.execute(
+                "UPDATE episodes SET status='canceled' WHERE id=?",
+                (submission.episode.id,),
+            )
+            conn.execute(
+                "UPDATE jobs SET status='canceled' WHERE episode_id=?",
+                (submission.episode.id,),
+            )
+
+        async with self.runtime.events.subscribe() as queue:
+            self.runtime.require_episodes().delete_episode(submission.episode.id)
+            events = await _drain(queue, 2)
+
+        self.assertEqual(
+            [(event.type, event.data) for event in events],
+            [
+                ("episode.deleted", {"episodeId": submission.episode.id}),
+                ("dashboard.invalidated", {}),
+            ],
+        )
+
 
 async def _drain(queue, count):
     return [

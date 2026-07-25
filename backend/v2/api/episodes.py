@@ -155,6 +155,11 @@ def create_episode_router(runtime: V2Runtime) -> APIRouter:
             for episode in runtime.require_episodes().list_projects(limit, offset)
         ]
 
+    @router.delete("/{episode_id}", status_code=204)
+    def delete_episode(episode_id: str):
+        runtime.require_episodes().delete_episode(episode_id)
+        return Response(status_code=204)
+
     @router.get("/{episode_id}", response_model=EpisodeResponse)
     def get_episode(episode_id: str):
         service = runtime.require_episodes()
