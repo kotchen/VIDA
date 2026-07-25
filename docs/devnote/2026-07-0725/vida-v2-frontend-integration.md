@@ -50,6 +50,7 @@
 
 - Dockerfile 增加前端构建阶段，运行镜像继续只启动一个 FastAPI/Uvicorn 进程。
 - README、环境变量模板、Docker Compose 和 v2 API 契约已同步更新。
+- 根目录 `.gitignore` 忽略本地 `data/` 运行目录，避免 SQLite、媒体产物或其他运行数据被误提交。
 - 合并后验证结果：
   - 前端：20 个测试文件、66 个测试通过；
   - 前端 lint：通过，保留 2 条既有 Fast Refresh warning；

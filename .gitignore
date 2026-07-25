@@ -46,6 +46,9 @@ tools/ffmpeg/
 *.tmp
 *.temp
 
+# Local VIDA runtime data
+/data/
+
 # Environment variables
 .env
 .env.local
