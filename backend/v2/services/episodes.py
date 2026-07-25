@@ -21,6 +21,7 @@ from ..domain import (
     TranscriptSegmentRecord,
 )
 from ..errors import V2Error
+from ..events import EventPublisher, ignore_event
 from ..repositories.episodes import EpisodeRepository
 from ..repositories.jobs import JobRepository
 from ..repositories.chapters import ChapterRepository
@@ -81,12 +82,14 @@ class EpisodeService:
         database: Database | None = None,
         data_dir: Path | None = None,
         chapters: ChapterRepository | None = None,
+        publish: EventPublisher = ignore_event,
     ):
         self._repository = repository
         self._jobs = jobs
         self._database = database
         self._data_dir = None if data_dir is None else Path(data_dir)
         self._chapters = chapters
+        self._publish = publish
 
     def get_episode(self, episode_id: str) -> EpisodeRecord:
         episode = self._repository.get(episode_id)
@@ -269,6 +272,24 @@ class EpisodeService:
                 ).rowcount
                 if changed != 1:
                     raise V2Error("invalid_episode_state", "Episode cannot be retried", 409, {})
+        self._publish(
+            "job.updated",
+            {
+                "jobId": job.id,
+                "episodeId": job.episode_id,
+                "status": job.status,
+                "progress": job.progress,
+            },
+        )
+        if job_type == "process_episode":
+            self._publish(
+                "episode.updated",
+                {
+                    "episodeId": job.episode_id,
+                    "status": "queued",
+                    "progress": 0,
+                },
+            )
         return job
 
     def _require_control_dependencies(self) -> None:
@@ -496,7 +517,16 @@ class EpisodeService:
                 "(submitted_at < ? OR (submitted_at = ? AND id < ?))",
                 (now, now, job_id),
             ).fetchone()[0]
-        return EpisodeSubmission(replace(episode, current_job_id=job_id), position)
+        submitted = replace(episode, current_job_id=job_id)
+        self._publish(
+            "episode.updated",
+            {
+                "episodeId": submitted.id,
+                "status": submitted.status,
+                "progress": submitted.progress,
+            },
+        )
+        return EpisodeSubmission(submitted, position)
 
     def _resolve_storage_path(self, relative_path: Path) -> Path:
         base = self._data_dir.resolve()

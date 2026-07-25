@@ -20,6 +20,7 @@ from .container import ProviderTestResult, V2Runtime
 from .crypto import CredentialCipher
 from .database import Database
 from .errors import V2Error
+from .events import V2EventBroker
 from .jobs.models import JobExecutor
 from .jobs.ai import AIProcessor
 from .jobs.pipeline import EpisodePipeline
@@ -44,7 +45,11 @@ from .services.provider_profiles import (
 
 def install_v2(app: FastAPI, project_root: Path) -> V2Runtime:
     root = Path(project_root)
-    runtime = V2Runtime(_initializer=lambda: _build_environment_runtime(root))
+    events = V2EventBroker()
+    runtime = V2Runtime(
+        events=events,
+        _initializer=lambda: _build_environment_runtime(root, events),
+    )
     runtime.install(app)
     return runtime
 
@@ -67,22 +72,34 @@ def build_test_runtime(
     return _build_runtime(settings, executor)
 
 
-def _build_environment_runtime(project_root: Path) -> V2Runtime:
-    return _build_runtime(V2Settings.from_environ(os.environ, project_root))
+def _build_environment_runtime(
+    project_root: Path, events: V2EventBroker | None = None
+) -> V2Runtime:
+    return _build_runtime(V2Settings.from_environ(os.environ, project_root), events=events)
 
 
 def _build_runtime(
-    settings: V2Settings, executor: JobExecutor | None = None
+    settings: V2Settings,
+    executor: JobExecutor | None = None,
+    events: V2EventBroker | None = None,
 ) -> V2Runtime:
+    event_broker = events or V2EventBroker()
     database = Database(settings.database_path)
     database.initialize()
     repository = ProviderProfileRepository(database)
-    service = ProviderProfileService(repository, CredentialCipher(settings.master_key))
-    job_repository = JobRepository(database)
+    service = ProviderProfileService(
+        repository, CredentialCipher(settings.master_key), event_broker.publish
+    )
+    job_repository = JobRepository(database, event_broker.publish)
     episode_repository = EpisodeRepository(database)
     chapter_repository = ChapterRepository(database)
     episode_service = EpisodeService(
-        episode_repository, job_repository, database, settings.data_dir, chapter_repository
+        episode_repository,
+        job_repository,
+        database,
+        settings.data_dir,
+        chapter_repository,
+        event_broker.publish,
     )
     media_service = MediaService(settings.data_dir, [episode_repository])
     if executor is None:
@@ -121,6 +138,7 @@ def _build_runtime(
         poll_interval_sec=1.0,
     )
     return V2Runtime(
+        events=event_broker,
         settings=settings,
         database=database,
         job_repository=job_repository,

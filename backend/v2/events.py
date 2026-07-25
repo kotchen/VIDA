@@ -4,6 +4,7 @@ import asyncio
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Callable
 from uuid import uuid4
 
 
@@ -12,6 +13,13 @@ class V2Event:
     id: str
     type: str
     data: dict[str, object]
+
+
+EventPublisher = Callable[[str, dict[str, object]], object]
+
+
+def ignore_event(_event_type: str, _data: dict[str, object]) -> None:
+    return None
 
 
 class V2EventBroker:

@@ -55,6 +55,7 @@ class V2Runtime:
         if self._initializer is None:
             raise RuntimeError("v2 runtime has no initializer")
         initialized = self._initializer()
+        self.events = initialized.events
         self.settings = initialized.settings
         self.database = initialized.database
         self.job_repository = initialized.job_repository
