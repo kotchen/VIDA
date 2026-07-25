@@ -78,6 +78,22 @@ class ChapterRepository:
         start_sec: float | None = None,
         title: str | None = None,
     ) -> ChapterRecord:
+        return self.update(
+            episode_id,
+            chapter_id,
+            start_sec=start_sec,
+            title=title,
+        )
+
+    def update(
+        self,
+        episode_id: str,
+        chapter_id: str,
+        *,
+        start_sec: float | None = None,
+        title: str | None = None,
+        bookmarked: bool | None = None,
+    ) -> ChapterRecord:
         with self._database.transaction(immediate=True) as conn:
             _require_episode(conn, episode_id)
             row = conn.execute(
@@ -87,25 +103,43 @@ class ChapterRepository:
             ).fetchone()
             if row is None:
                 raise KeyError(chapter_id)
-            if row["source"] != "manual":
+            content_changed = start_sec is not None or title is not None
+            if content_changed and row["source"] != "manual":
                 raise PermissionError(chapter_id)
             new_start = row["start_sec"] if start_sec is None else start_sec
             new_title = row["title"] if title is None else title
-            duration = _duration_to_next_or_end(
-                conn, episode_id, new_start, excluding_id=chapter_id
+            new_bookmarked = (
+                bool(row["bookmarked"]) if bookmarked is None else bookmarked
             )
             conn.execute(
-                "UPDATE chapters SET start_sec=?,title=?,duration_sec=? "
-                "WHERE id=? AND episode_id=? AND source='manual'",
-                (new_start, new_title, duration, chapter_id, episode_id),
+                "UPDATE chapters SET start_sec=?,title=?,bookmarked=? "
+                "WHERE id=? AND episode_id=?",
+                (
+                    new_start,
+                    new_title,
+                    int(new_bookmarked),
+                    chapter_id,
+                    episode_id,
+                ),
             )
-            _recompute_durations(conn, episode_id)
-            duration = conn.execute(
-                "SELECT duration_sec FROM chapters WHERE id=?", (chapter_id,)
-            ).fetchone()[0]
+            if content_changed:
+                _duration_to_next_or_end(
+                    conn, episode_id, new_start, excluding_id=chapter_id
+                )
+                _recompute_durations(conn, episode_id)
+            updated = conn.execute(
+                "SELECT duration_sec FROM chapters WHERE id=?",
+                (chapter_id,),
+            ).fetchone()
             return ChapterRecord(
-                chapter_id, episode_id, new_start, new_title, duration,
-                row["thumbnail_path"], bool(row["bookmarked"]), "manual",
+                chapter_id,
+                episode_id,
+                new_start,
+                new_title,
+                updated["duration_sec"],
+                row["thumbnail_path"],
+                new_bookmarked,
+                row["source"],
             )
 
     def delete_manual(self, episode_id: str, chapter_id: str) -> None:

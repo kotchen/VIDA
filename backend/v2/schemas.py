@@ -196,6 +196,7 @@ class ChapterUpdate(ApiModel):
 
     start_sec: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     title: ChapterTitleString | None = None
+    bookmarked: bool | None = None
 
     @model_validator(mode="after")
     def require_change(self) -> "ChapterUpdate":

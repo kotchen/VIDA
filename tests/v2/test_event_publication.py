@@ -178,6 +178,46 @@ class EventPublicationTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_chapter_mutations_publish_episode_update(self):
+        profile = self.runtime.require_provider_profiles().create_profile(
+            "Primary", "https://api.test/v1", "secret-value", "model", 0.1
+        )
+        submission = self.runtime.require_episodes().submit_url(
+            "https://media.test/one", profile.id, "en", "Episode"
+        )
+        episode_id = submission.episode.id
+        with self.runtime.database.transaction(immediate=True) as conn:
+            conn.execute(
+                "UPDATE episodes SET duration_sec=100 WHERE id=?",
+                (episode_id,),
+            )
+        service = self.runtime.require_episodes()
+
+        async with self.runtime.events.subscribe() as queue:
+            chapter = service.create_chapter(episode_id, 10, "Manual")
+            created = await asyncio.wait_for(queue.get(), 0.1)
+            service.update_chapter(
+                episode_id,
+                chapter.id,
+                start_sec=None,
+                title=None,
+                bookmarked=True,
+            )
+            updated = await asyncio.wait_for(queue.get(), 0.1)
+            service.delete_chapter(episode_id, chapter.id)
+            deleted = await asyncio.wait_for(queue.get(), 0.1)
+
+        self.assertEqual(
+            [(event.type, event.data) for event in (created, updated, deleted)],
+            [
+                (
+                    "episode.updated",
+                    {"episodeId": episode_id, "status": "queued", "progress": 0},
+                )
+            ]
+            * 3,
+        )
+
 
 async def _drain(queue, count):
     return [

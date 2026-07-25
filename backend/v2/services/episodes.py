@@ -156,17 +156,22 @@ class EpisodeService:
                 "validation_error", "Chapter start is outside episode duration", 422, {}
             )
         try:
-            return self._chapters.create_manual_derived(
+            created = self._chapters.create_manual_derived(
                 episode_id, start_sec, title, episode.poster_path
             )
         except ValueError:
             raise V2Error(
                 "validation_error", "Chapter start is outside episode duration", 422, {}
             ) from None
+        self._publish_episode_updated(episode)
+        return created
 
     def update_chapter(
         self, episode_id: str, chapter_id: str,
-        *, start_sec: float | None, title: str | None,
+        *,
+        start_sec: float | None,
+        title: str | None,
+        bookmarked: bool | None = None,
     ) -> ChapterRecord:
         episode = self.get_episode(episode_id)
         if self._chapters is None:
@@ -178,8 +183,12 @@ class EpisodeService:
                 "validation_error", "Chapter start is outside episode duration", 422, {}
             )
         try:
-            return self._chapters.update_manual(
-                episode_id, chapter_id, start_sec=start_sec, title=title
+            updated = self._chapters.update(
+                episode_id,
+                chapter_id,
+                start_sec=start_sec,
+                title=title,
+                bookmarked=bookmarked,
             )
         except KeyError:
             raise V2Error("chapter_not_found", "Chapter not found", 404, {}) from None
@@ -187,9 +196,11 @@ class EpisodeService:
             raise V2Error(
                 "generated_chapter_immutable", "Generated chapters cannot be edited", 409, {}
             ) from None
+        self._publish_episode_updated(episode)
+        return updated
 
     def delete_chapter(self, episode_id: str, chapter_id: str) -> None:
-        self.get_episode(episode_id)
+        episode = self.get_episode(episode_id)
         if self._chapters is None:
             raise RuntimeError("chapter repository is not configured")
         try:
@@ -200,6 +211,17 @@ class EpisodeService:
             raise V2Error(
                 "generated_chapter_immutable", "Generated chapters cannot be deleted", 409, {}
             ) from None
+        self._publish_episode_updated(episode)
+
+    def _publish_episode_updated(self, episode: EpisodeRecord) -> None:
+        self._publish(
+            "episode.updated",
+            {
+                "episodeId": episode.id,
+                "status": episode.status,
+                "progress": episode.progress,
+            },
+        )
 
     def get_job(self, job_id: str) -> JobRecord:
         self._require_control_dependencies()

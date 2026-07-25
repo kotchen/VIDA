@@ -202,7 +202,11 @@ def create_episode_router(runtime: V2Runtime) -> APIRouter:
     def update_chapter(episode_id: str, chapter_id: str, payload: ChapterUpdate):
         service = runtime.require_episodes()
         updated = service.update_chapter(
-            episode_id, chapter_id, start_sec=payload.start_sec, title=payload.title
+            episode_id,
+            chapter_id,
+            start_sec=payload.start_sec,
+            title=payload.title,
+            bookmarked=payload.bookmarked,
         )
         episode = service.get_episode(episode_id)
         rows = service.get_chapters(episode_id)
