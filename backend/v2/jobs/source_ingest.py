@@ -929,6 +929,7 @@ class YtDlpDownloader:
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
+            "noprogress": True,
             "cachedir": False,
             "socket_timeout": min(15.0, self._timeout),
             "max_filesize": self._max_bytes,

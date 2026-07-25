@@ -241,6 +241,7 @@ class YtDlpAcquisitionTests(unittest.IsolatedAsyncioTestCase):
             captured["outtmpl"], str(directory / "media.%(ext)s")
         )
         self.assertTrue(captured["noplaylist"])
+        self.assertTrue(captured["noprogress"])
         self.assertFalse(captured["cachedir"])
         self.assertEqual(captured["max_filesize"], 123)
         self.assertNotIn("postprocessors", captured)
