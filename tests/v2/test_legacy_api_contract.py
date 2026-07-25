@@ -81,12 +81,13 @@ class LegacyApiContractTests(unittest.TestCase):
 
     def test_openapi_has_unique_operations_and_exact_approved_v2_routes(self):
         expected = {
+            "/api/v2/events": {"get"},
             "/api/v2/dashboard": {"get"},
             "/api/v2/provider-profiles": {"get", "post"},
             "/api/v2/provider-profiles/{profile_id}": {"delete", "get", "patch"},
             "/api/v2/provider-profiles/{profile_id}/test": {"post"},
             "/api/v2/episodes": {"get", "post"},
-            "/api/v2/episodes/{episode_id}": {"get"},
+            "/api/v2/episodes/{episode_id}": {"delete", "get"},
             "/api/v2/episodes/{episode_id}/transcript": {"get"},
             "/api/v2/episodes/{episode_id}/summary": {"get"},
             "/api/v2/episodes/{episode_id}/chapters": {"get", "post"},
@@ -148,7 +149,9 @@ class LegacyApiContractTests(unittest.TestCase):
     def test_contract_document_lists_every_approved_route(self):
         contract = Path("docs/api/v2-api-contract.md").read_text(encoding="utf-8")
         for route in (
+            "GET /api/v2/events",
             "GET /api/v2/episodes",
+            "DELETE /api/v2/episodes/{id}",
             "POST /api/v2/provider-profiles/{id}/test",
             "POST /api/v2/episodes/{id}/summary/regenerate",
             "POST /api/v2/episodes/{id}/chapters/regenerate",

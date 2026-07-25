@@ -27,6 +27,39 @@
 }
 ```
 
+## 实时事件流
+
+```http
+GET /api/v2/events
+Accept: text/event-stream
+```
+
+成功响应使用 `Content-Type: text/event-stream`，并返回
+`Cache-Control: no-cache` 与 `X-Accel-Buffering: no`。连接建立后先发送
+`retry: 3000`；事件帧包含递增的 `id`、`event` 和单行 JSON `data`，空闲时每
+15 秒发送一次 heartbeat comment。
+
+公开事件类型和 data 如下：
+
+```ts
+type V2Event =
+  | { type: 'episode.updated'; data: {
+      episodeId: string; status: EpisodeStatus; progress: number
+    } }
+  | { type: 'episode.deleted'; data: { episodeId: string } }
+  | { type: 'job.updated'; data: {
+      jobId: string; episodeId: string; status: EpisodeStatus; progress: number
+    } }
+  | { type: 'profiles.invalidated'; data: Record<string, never> }
+  | { type: 'dashboard.invalidated'; data: Record<string, never> }
+```
+
+事件只用于提示客户端重新读取 REST 资源，不替代 REST 作为状态真值。事件
+broker 位于单个服务进程内，不持久化、无跨进程广播，也不支持 replay；
+`Last-Event-ID` 不保证补发。断线重连后客户端必须重新获取当前页面依赖的
+Episode、Job、Profile 或 Dashboard 数据。生产部署仍只允许单个
+FastAPI/Uvicorn 进程。
+
 ## 响应模型
 
 ```ts
@@ -204,6 +237,19 @@ GET /api/v2/dashboard
 
 转录按 `startSec` 排序；空 speaker 以 `Speaker 1` 返回。章节按 `startSec` 排序，`durationSec` 由下一章节起点或 Episode 总时长推导。
 
+### 删除
+
+```text
+DELETE /api/v2/episodes/{id}
+```
+
+只有 `completed`、`failed` 或 `canceled` Episode 可以删除，成功返回 204。
+删除会在数据库事务中级联移除关联 Job、转录、摘要和章节，并在事务提交后清理
+受控的 `data/v2/episodes/{episodeId}/` 文件树。`queued` 或 `processing`
+返回 409 `invalid_episode_state`，调用方应先取消；不存在的 Episode 返回 404
+`episode_not_found`。成功后事件流依次发布 `episode.deleted` 和
+`dashboard.invalidated`。
+
 ## Queue、Job、取消和重试
 
 ```text
@@ -229,7 +275,13 @@ POST /api/v2/episodes/{id}/summary/regenerate
 POST /api/v2/episodes/{id}/chapters/regenerate
 ```
 
-章节创建 body 为 `{ "startSec": 123, "title": "New Chapter" }`，返回 201。PATCH 至少提供 `startSec` 或 `title`；start 必须是有限非负数且不超过 Episode 时长。仅 manual 章节可修改或删除；DELETE 成功返回 204。
+章节创建 body 为 `{ "startSec": 123, "title": "New Chapter" }`，返回 201。
+PATCH 至少提供 `startSec`、`title` 或 `bookmarked` 之一，字段不能为 null；
+start 必须是有限非负数且不超过 Episode 时长。generated 和 manual 章节均可
+更新 `bookmarked`；只有 manual 章节可修改 `startSec`/`title` 或删除。
+包含内容字段和书签字段的 PATCH 在一个数据库事务中执行；若 generated 章节的
+内容修改返回 409 `generated_chapter_immutable`，书签也不会部分更新。DELETE
+成功返回 204。
 
 独立重新生成仅接受 completed Episode，返回 202 Job，并占用同一 FIFO/并发槽但不把 Episode 改回 processing。摘要在新值完整生成后原子替换，失败保留旧摘要；章节仅替换 generated 章节，manual 章节始终保留，失败时旧 generated 章节也保留。
 
