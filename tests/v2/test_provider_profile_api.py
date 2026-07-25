@@ -20,6 +20,12 @@ class ProviderProfileApiTests(unittest.TestCase):
         self.runtime.provider_tester = AsyncMock(
             return_value=(True, 15, True, "Connection successful")
         )
+        self.runtime.provider_model_fetcher = AsyncMock(
+            return_value=(
+                [("model-a", "Model A"), ("model-b", "Model B")],
+                24,
+            )
+        )
         app = FastAPI()
         self.runtime.install(app)
         self.client = TestClient(app)
@@ -181,6 +187,127 @@ class ProviderProfileApiTests(unittest.TestCase):
         self.assertEqual(credentials.revision, 2)
         self.assertEqual(credentials.api_key, "new-secret")
         self.assertEqual(credentials.model_id, "model-b")
+
+    def test_model_discovery_uses_draft_credentials(self):
+        response = self.client.post(
+            "/api/v2/provider-profiles/models",
+            json={
+                "baseUrl": "https://draft.example/v1",
+                "apiKey": "draft-secret",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.json(),
+            {
+                "models": [
+                    {"id": "model-a", "name": "Model A"},
+                    {"id": "model-b", "name": "Model B"},
+                ],
+                "latencyMs": 24,
+            },
+        )
+        self.runtime.provider_model_fetcher.assert_awaited_once_with(
+            "https://draft.example/v1", "draft-secret"
+        )
+
+    def test_model_discovery_reuses_active_key_with_draft_url(self):
+        created = self.create_profile()
+
+        response = self.client.post(
+            "/api/v2/provider-profiles/models",
+            json={
+                "profileId": created["id"],
+                "baseUrl": "https://changed.example/v1",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.runtime.provider_model_fetcher.assert_awaited_once_with(
+            "https://changed.example/v1", "secret-key"
+        )
+
+    def test_model_discovery_draft_key_overrides_saved_key(self):
+        created = self.create_profile()
+
+        response = self.client.post(
+            "/api/v2/provider-profiles/models",
+            json={
+                "profileId": created["id"],
+                "baseUrl": "https://changed.example/v1",
+                "apiKey": "override-secret",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.runtime.provider_model_fetcher.assert_awaited_once_with(
+            "https://changed.example/v1", "override-secret"
+        )
+
+    def test_model_discovery_validates_credentials_and_unknown_fields(self):
+        cases = (
+            {"baseUrl": "https://api.example/v1"},
+            {
+                "baseUrl": "https://api.example/v1",
+                "apiKey": "secret-key",
+                "unexpected": True,
+            },
+        )
+        for payload in cases:
+            with self.subTest(payload=payload):
+                response = self.client.post(
+                    "/api/v2/provider-profiles/models",
+                    json=payload,
+                )
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertEqual(
+                    response.json()["error"]["code"],
+                    "validation_error",
+                )
+
+    def test_model_discovery_rejects_missing_and_deleted_profiles(self):
+        created = self.create_profile()
+        self.assertEqual(
+            self.client.delete(
+                f"/api/v2/provider-profiles/{created['id']}"
+            ).status_code,
+            204,
+        )
+        for profile_id in ("missing", created["id"]):
+            with self.subTest(profile_id=profile_id):
+                response = self.client.post(
+                    "/api/v2/provider-profiles/models",
+                    json={
+                        "profileId": profile_id,
+                        "baseUrl": "https://api.example/v1",
+                    },
+                )
+                self.assertEqual(response.status_code, 404, response.text)
+                self.assert_profile_not_found(response)
+
+    def test_model_discovery_sanitizes_fetcher_failure(self):
+        self.runtime.provider_model_fetcher.side_effect = RuntimeError(
+            "upstream response containing draft-secret"
+        )
+
+        response = self.client.post(
+            "/api/v2/provider-profiles/models",
+            json={
+                "baseUrl": "https://draft.example/v1?token=url-secret",
+                "apiKey": "draft-secret",
+            },
+        )
+
+        self.assertEqual(response.status_code, 502, response.text)
+        error = response.json()["error"]
+        self.assertEqual(error["code"], "provider_models_fetch_failed")
+        self.assertEqual(error["message"], "Unable to fetch provider models")
+        self.assertEqual(error["details"], {})
+        self.assertEqual(response.headers["X-Request-ID"], error["requestId"])
+        self.assertNotIn("draft-secret", response.text)
+        self.assertNotIn("url-secret", response.text)
+        self.assertNotIn("upstream response", response.text)
 
     def assert_profile_not_found(self, response):
         error = response.json()["error"]

@@ -113,6 +113,39 @@ class ProviderConnectionTestResponse(ApiModel):
     message: str
 
 
+class ProviderModelDiscoveryRequest(ApiModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: ProviderProfileIdString | None = None
+    base_url: HttpUrl
+    api_key: SecretStr | None = None
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def validate_api_key(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                raise ValueError("apiKey must not be empty")
+        return value
+
+    @model_validator(mode="after")
+    def require_credentials(self) -> "ProviderModelDiscoveryRequest":
+        if self.profile_id is None and self.api_key is None:
+            raise ValueError("profileId or apiKey is required")
+        return self
+
+
+class ProviderModelOptionResponse(ApiModel):
+    id: str
+    name: str
+
+
+class ProviderModelDiscoveryResponse(ApiModel):
+    models: list[ProviderModelOptionResponse]
+    latency_ms: int = Field(ge=0)
+
+
 class EpisodeUrlSubmission(ApiModel):
     model_config = ConfigDict(extra="forbid")
 
