@@ -8,10 +8,12 @@ export function SummaryCard({
   summary,
   loading = false,
   onRegenerate,
+  regenerating = false,
 }: {
   summary: Summary | null
   loading?: boolean
   onRegenerate?: () => void
+  regenerating?: boolean
 }) {
   if (loading) {
     return <Card className="card-glow p-4 text-muted-warm">Loading summary…</Card>
@@ -20,7 +22,11 @@ export function SummaryCard({
     return (
       <Card className="card-glow p-4">
         <p className="text-muted-warm">Summary is not available yet.</p>
-        {onRegenerate ? <Button onClick={onRegenerate}>Generate summary</Button> : null}
+        {onRegenerate ? (
+          <Button disabled={regenerating} onClick={onRegenerate}>
+            Generate summary
+          </Button>
+        ) : null}
       </Card>
     )
   }

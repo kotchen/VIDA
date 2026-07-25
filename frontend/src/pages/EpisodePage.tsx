@@ -1,4 +1,5 @@
-import { Link, useParams } from "react-router"
+import { useState } from "react"
+import { Link, useNavigate, useParams } from "react-router"
 
 import { ChaptersCard } from "@/components/dashboard/ChaptersCard"
 import { ExportCard } from "@/components/dashboard/ExportCard"
@@ -7,10 +8,17 @@ import { SummaryCard } from "@/components/dashboard/SummaryCard"
 import { TranscriptCard } from "@/components/dashboard/TranscriptCard"
 import { EpisodeStatusPanel } from "@/features/episode/EpisodeStatusPanel"
 import { useEpisode } from "@/features/episode/useEpisode"
+import { ChapterEditor } from "@/features/episode/ChapterEditor"
+import { DeleteEpisodeDialog } from "@/features/episode/DeleteEpisodeDialog"
+import type { Chapter } from "@/api/types"
+import { Button } from "@/components/ui/button"
 
 export function EpisodePage() {
   const { id = "" } = useParams()
+  const navigate = useNavigate()
   const state = useEpisode(id)
+  const [chapterEditor, setChapterEditor] = useState<Chapter | "new" | null>(null)
+  const [deleteOpen, setDeleteOpen] = useState(false)
 
   if (state.notFound) {
     return (
@@ -60,6 +68,7 @@ export function EpisodePage() {
         episode={episode}
         onCancel={() => void state.cancel()}
         onRetry={() => void state.retry()}
+        onDelete={() => setDeleteOpen(true)}
       />
       {episode.status === "completed" ? (
         <div className="grid gap-5 lg:grid-cols-2">
@@ -67,11 +76,63 @@ export function EpisodePage() {
           <SummaryCard
             summary={state.summary}
             loading={state.contentLoading}
+            onRegenerate={() => void state.regenerateSummary()}
+            regenerating={state.operation !== null}
           />
           <TranscriptCard segments={state.transcript} />
-          <ChaptersCard chapters={state.chapters} />
-          <ExportCard />
+          <ChaptersCard
+            chapters={state.chapters}
+            onCreate={() => setChapterEditor("new")}
+            onEdit={setChapterEditor}
+            onDelete={(chapter) => void state.deleteChapter(chapter.id)}
+            onBookmark={(chapter) => void state.toggleBookmark(chapter)}
+          />
+          <div>
+            <ExportCard episodeId={episode.id} />
+            <Button
+              disabled={state.operation !== null}
+              onClick={() => void state.regenerateChapters()}
+            >
+              Regenerate chapters
+            </Button>
+            <Button variant="destructive" onClick={() => setDeleteOpen(true)}>
+              Delete Episode
+            </Button>
+          </div>
         </div>
+      ) : null}
+      {chapterEditor ? (
+        <ChapterEditor
+          chapter={chapterEditor === "new" ? undefined : chapterEditor}
+          episodeDurationSec={episode.durationSec}
+          onCancel={() => setChapterEditor(null)}
+          onSubmit={async (input) => {
+            if (
+              chapterEditor === "new" &&
+              typeof input.startSec === "number" &&
+              typeof input.title === "string"
+            ) {
+              await state.createChapter({
+                startSec: input.startSec,
+                title: input.title,
+              })
+            } else if (chapterEditor !== "new") {
+              await state.updateChapter(chapterEditor.id, input)
+            }
+            setChapterEditor(null)
+          }}
+        />
+      ) : null}
+      {deleteOpen ? (
+        <DeleteEpisodeDialog
+          title={episode.title}
+          deleting={state.operation === "delete"}
+          onCancel={() => setDeleteOpen(false)}
+          onConfirm={async () => {
+            await state.deleteEpisode()
+            navigate("/library")
+          }}
+        />
       ) : null}
     </div>
   )

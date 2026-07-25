@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -182,6 +182,7 @@ class ChapterResponse(ApiModel):
     duration_sec: float
     thumbnail_url: str | None
     bookmarked: bool
+    source: Literal["generated", "manual"]
 
 
 class ChapterCreate(ApiModel):

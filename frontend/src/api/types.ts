@@ -67,6 +67,7 @@ export interface Chapter {
   durationSec: number
   thumbnailUrl: string | null
   bookmarked: boolean
+  source: "generated" | "manual"
 }
 
 export interface DashboardData {

@@ -435,6 +435,7 @@ def _chapter_responses(episode, rows) -> list[ChapterResponse]:
                 else f"/api/v2/episodes/{episode.id}/poster"
             ),
             bookmarked=row.bookmarked,
+            source=row.source,
         ))
     return result
 

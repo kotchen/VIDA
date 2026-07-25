@@ -5,12 +5,24 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import type { Chapter } from "@/data/types"
 import { formatSeconds } from "@/lib/format"
 
-export function ChaptersCard({ chapters }: { chapters: Chapter[] }) {
+export function ChaptersCard({
+  chapters,
+  onCreate,
+  onEdit,
+  onDelete,
+  onBookmark,
+}: {
+  chapters: Chapter[]
+  onCreate?: () => void
+  onEdit?: (chapter: Chapter) => void
+  onDelete?: (chapter: Chapter) => void
+  onBookmark?: (chapter: Chapter) => void
+}) {
   return (
     <Card className="card-glow flex h-full flex-col gap-3 rounded-2xl border-warm/60 bg-card p-4">
       <div className="flex items-center justify-between gap-2">
         <h2 className="text-base font-semibold text-gold">Chapters &amp; Highlights</h2>
-        <Button size="sm" className="bg-copper-gradient text-on-copper hover:opacity-90">
+        <Button onClick={onCreate} size="sm" className="bg-copper-gradient text-on-copper hover:opacity-90">
           <Plus className="size-4" />
           Add Chapter
         </Button>
@@ -27,8 +39,19 @@ export function ChaptersCard({ chapters }: { chapters: Chapter[] }) {
               <span className="tnum w-11 shrink-0 text-xs text-copper-300">{formatSeconds(ch.startSec)}</span>
               <span className="min-w-0 flex-1 truncate text-sm">{ch.title}</span>
               <span className="tnum shrink-0 text-xs text-muted-warm">{formatSeconds(ch.durationSec)}</span>
-              <Bookmark className="size-4 shrink-0 text-muted-warm" />
-              <MoreVertical className="size-4 shrink-0 text-muted-warm" />
+              <button aria-label={`Bookmark ${ch.title}`} onClick={() => onBookmark?.(ch)}>
+                <Bookmark className={`size-4 shrink-0 ${ch.bookmarked ? "fill-current text-gold" : "text-muted-warm"}`} />
+              </button>
+              {ch.source === "manual" ? (
+                <>
+                  <button aria-label={`Edit ${ch.title}`} onClick={() => onEdit?.(ch)}>
+                    <MoreVertical className="size-4 shrink-0 text-muted-warm" />
+                  </button>
+                  <button aria-label={`Delete ${ch.title}`} onClick={() => onDelete?.(ch)}>
+                    Delete
+                  </button>
+                </>
+              ) : null}
             </li>
           ))}
         </ol>

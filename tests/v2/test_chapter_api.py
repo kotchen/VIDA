@@ -55,6 +55,10 @@ class ChapterApiTests(unittest.TestCase):
         )
         listed = self.client.get(f"/api/v2/episodes/{self.episode_id}/chapters").json()
         self.assertEqual([row["title"] for row in listed], ["Manual", "Generated"])
+        self.assertEqual(
+            [row["source"] for row in listed],
+            ["manual", "generated"],
+        )
 
     def test_create_validates_finite_episode_bounds_and_nonempty_title(self):
         for payload in (

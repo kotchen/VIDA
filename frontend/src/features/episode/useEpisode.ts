@@ -22,6 +22,8 @@ export function useEpisode(id: string) {
   const [contentLoading, setContentLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notFound, setNotFound] = useState(false)
+  const [operation, setOperation] = useState<string | null>(null)
+  const regenerationJob = useRef<string | null>(null)
   const controller = useRef<AbortController | null>(null)
   const requestId = useRef(0)
 
@@ -100,7 +102,17 @@ export function useEpisode(id: string) {
     (event) =>
       event.type === "reconnected" ||
       (("episodeId" in event.data) && event.data.episodeId === id),
-    () => void refresh(),
+    (event) => {
+      if (
+        event.type === "job.updated" &&
+        event.data.jobId === regenerationJob.current &&
+        ["completed", "failed", "canceled"].includes(event.data.status)
+      ) {
+        regenerationJob.current = null
+        setOperation(null)
+      }
+      void refresh()
+    },
   )
 
   const active =
@@ -122,6 +134,46 @@ export function useEpisode(id: string) {
     [refresh],
   )
 
+  const mutateContent = useCallback(
+    async (key: string, action: () => Promise<unknown>) => {
+      setOperation(key)
+      try {
+        await action()
+        await refresh()
+      } catch (caught) {
+        if (caught instanceof ApiError && caught.httpStatus === 409) {
+          await refresh()
+        }
+        setError(errorMessage(caught))
+      } finally {
+        if (!regenerationJob.current) setOperation(null)
+      }
+    },
+    [refresh],
+  )
+
+  const regenerate = useCallback(
+    async (kind: "summary" | "chapters") => {
+      setOperation(`regenerate:${kind}`)
+      try {
+        const job =
+          kind === "summary"
+            ? await episodesApi.regenerateSummary(id)
+            : await episodesApi.regenerateChapters(id)
+        regenerationJob.current = job.id
+      } catch (caught) {
+        if (caught instanceof ApiError && caught.httpStatus === 409) {
+          await refresh()
+          setError("A regeneration operation is already running")
+        } else {
+          setError(errorMessage(caught))
+        }
+        setOperation(null)
+      }
+    },
+    [id, refresh],
+  )
+
   return {
     episode,
     transcript,
@@ -131,9 +183,27 @@ export function useEpisode(id: string) {
     contentLoading,
     error,
     notFound,
+    operation,
     refresh,
     cancel: () => runAction(() => episodesApi.cancel(id)),
     retry: () => runAction(() => episodesApi.retry(id)),
+    createChapter: (input: Parameters<typeof episodesApi.createChapter>[1]) =>
+      mutateContent("chapter", () => episodesApi.createChapter(id, input)),
+    updateChapter: (
+      chapterId: string,
+      input: Parameters<typeof episodesApi.updateChapter>[2],
+    ) => mutateContent("chapter", () => episodesApi.updateChapter(id, chapterId, input)),
+    deleteChapter: (chapterId: string) =>
+      mutateContent("chapter", () => episodesApi.deleteChapter(id, chapterId)),
+    toggleBookmark: (chapter: Chapter) =>
+      mutateContent("bookmark", () =>
+        episodesApi.updateChapter(id, chapter.id, {
+          bookmarked: !chapter.bookmarked,
+        }),
+      ),
+    regenerateSummary: () => regenerate("summary"),
+    regenerateChapters: () => regenerate("chapters"),
+    deleteEpisode: () => episodesApi.delete(id),
   }
 }
 

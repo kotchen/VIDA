@@ -15,6 +15,9 @@ vi.mock("@/api/episodes", () => ({
     getChapters: vi.fn(),
     cancel: vi.fn(),
     retry: vi.fn(),
+    exportUrl: vi.fn((id: string, format: string) =>
+      `/api/v2/episodes/${id}/export?format=${format}`,
+    ),
   },
 }))
 vi.mock("@/features/events/useV2Events", () => ({
@@ -77,6 +80,7 @@ describe("EpisodePage", () => {
         durationSec: 120,
         thumbnailUrl: null,
         bookmarked: false,
+        source: "generated",
       },
     ])
     vi.mocked(episodesApi.cancel).mockReset().mockResolvedValue({} as never)
