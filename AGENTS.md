@@ -116,7 +116,7 @@ npm run dev -- --host 127.0.0.1
 ## 本地访问地址
 
 - 旧版 UI：`http://127.0.0.1:8000/`
-- FastAPI 托管的 VIDA 2.0：`http://127.0.0.1:8000/v2/`
+- FastAPI 托管的 VIDA 2.0：`http://127.0.0.1:8000/v2`（当前版本不要添加尾斜杠）
 - Vite 开发页面：`http://127.0.0.1:7100/v2/`
 - v2 Dashboard API：`http://127.0.0.1:8000/api/v2/dashboard`
 - Vite 代理 API：`http://127.0.0.1:7100/api/v2/dashboard`
@@ -126,7 +126,7 @@ npm run dev -- --host 127.0.0.1
 
 ```bash
 curl --fail http://127.0.0.1:8000/api/v2/dashboard
-curl --fail http://127.0.0.1:8000/v2/
+curl --fail http://127.0.0.1:8000/v2
 curl --fail http://127.0.0.1:7100/v2/
 curl --fail http://127.0.0.1:7100/api/v2/dashboard
 ```
