@@ -38,7 +38,7 @@ class CompletionRunner(Protocol):
 class OpenAICompletionRunner:
     """Create and close one provider client for each request."""
 
-    def __init__(self, timeout_sec: float = 120.0, client_factory=AsyncOpenAI):
+    def __init__(self, timeout_sec: float = 300.0, client_factory=AsyncOpenAI):
         self._timeout_sec = timeout_sec
         self._client_factory = client_factory
 
@@ -81,7 +81,7 @@ class AIProcessor:
         *,
         runner: CompletionRunner | None = None,
         summarizer_factory=Summarizer,
-        timeout_sec: float = 120.0,
+        timeout_sec: float = 300.0,
     ):
         if timeout_sec <= 0:
             raise ValueError("timeout_sec must be positive")
@@ -150,7 +150,10 @@ class AIProcessor:
             },
             {
                 "role": "user",
-                "content": f"Language: {target_language}\nTitle: {title}\n\n{transcript}",
+                "content": (
+                    f"Language: {_language_name(target_language)}\n"
+                    f"Title: {title}\n\n{transcript}"
+                ),
             },
         )
         payload = await self._request(messages)
@@ -187,16 +190,36 @@ class AIProcessor:
         transcript: str,
         duration_sec: float,
         thumbnail_path: str | None,
+        title: str = "",
+        language: str = "",
     ) -> list[ChapterRecord]:
+        duration_hint = max(0, int(duration_sec))
         messages = (
             {
                 "role": "system",
                 "content": (
-                    "Return one strict JSON object with a chapters array. Each item "
-                    "must contain only startSec and title, ordered by startSec."
+                    "You split a video transcript into chapters. Return one strict "
+                    "JSON object with a chapters array and no other keys. Each item "
+                    "must contain only startSec and title, ordered by startSec. "
+                    "Rules: startSec is seconds from the video start; the first "
+                    "chapter starts at 0; every startSec is smaller than the video "
+                    "duration; create about one chapter per 3 to 8 minutes of video; "
+                    "each title is a short descriptive phrase of at most 40 "
+                    f"characters written in {_language_name(language) or 'the transcript language'}; "
+                    "never return an empty chapters array. Example for a 600 second "
+                    'video: {"chapters": [{"startSec": 0, "title": "Opening '
+                    'remarks"}, {"startSec": 245, "title": "Key argument"}, '
+                    '{"startSec": 502, "title": "Wrap-up"}]}'
                 ),
             },
-            {"role": "user", "content": transcript},
+            {
+                "role": "user",
+                "content": (
+                    f"Video title: {title}\n"
+                    f"Video duration: {duration_hint} seconds\n\n"
+                    f"Transcript:\n{transcript}"
+                ),
+            },
         )
         payload = await self._request(messages)
         try:
@@ -225,6 +248,8 @@ class AIProcessor:
                     raise ValueError
                 starts.append(start)
                 titles.append(title)
+            if not starts:
+                raise ValueError
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             raise AIExecutionError("Chapter output is invalid") from None
         return [
@@ -273,6 +298,26 @@ def _plain_text(value) -> str:
     if not text:
         raise ValueError
     return text
+
+
+_LANGUAGE_NAMES = {
+    "zh": "Chinese",
+    "zh-hans": "Simplified Chinese",
+    "zh-cn": "Simplified Chinese",
+    "zh-sg": "Simplified Chinese",
+    "zh-hant": "Traditional Chinese",
+    "zh-tw": "Traditional Chinese",
+    "zh-hk": "Traditional Chinese",
+    "en": "English",
+    "ja": "Japanese",
+    "es": "Spanish",
+}
+
+
+def _language_name(code: str) -> str:
+    """Map a submission language code to the name an LLM understands."""
+    normalized = (code or "").strip().lower()
+    return _LANGUAGE_NAMES.get(normalized, code or "")
 
 
 def _one_line_title(value) -> str:

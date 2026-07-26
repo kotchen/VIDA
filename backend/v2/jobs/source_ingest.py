@@ -12,10 +12,11 @@ import secrets
 import shutil
 import socket
 import ssl
+import yt_dlp
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 from urllib.parse import urljoin, urlsplit
 
 from ..domain import EpisodeRecord
@@ -96,6 +97,13 @@ class PreparedSource:
     media_content_type: str
     poster_path: Path
     poster_content_type: str
+    source_title: str | None = None
+
+
+@dataclass(frozen=True)
+class DownloadedMedia:
+    path: Path
+    title: str | None = None
 
 
 class ProcessRunner(Protocol):
@@ -114,6 +122,19 @@ class Downloader(Protocol):
         cancel_check: CancelCheck,
         progress: ProgressCallback | None = None,
     ) -> Awaitable[Path]: ...
+
+
+@runtime_checkable
+class MetadataDownloader(Protocol):
+    """Optional downloader extension that also reports the remote page title."""
+
+    def download_with_metadata(
+        self,
+        url: str,
+        directory: Path,
+        cancel_check: CancelCheck,
+        progress: ProgressCallback | None = None,
+    ) -> Awaitable[DownloadedMedia]: ...
 
 
 class Resolver(Protocol):
@@ -271,15 +292,23 @@ class SourceIngestor:
             raise SourceIngestError("Invalid attempt path")
         self._bounded_path(attempt, "attempt path")
         downloaded = episode.source_type == "url"
+        source_title: str | None = None
         try:
             _report(progress, 5)
             if downloaded:
                 _raise_if_canceled(cancel_check)
                 if not episode.source_url:
                     raise SourceIngestError("URL source is missing")
-                media = await self._downloader.download(
-                    episode.source_url, attempt / "source", cancel_check
-                )
+                if isinstance(self._downloader, MetadataDownloader):
+                    fetched = await self._downloader.download_with_metadata(
+                        episode.source_url, attempt / "source", cancel_check
+                    )
+                    media = fetched.path
+                    source_title = fetched.title
+                else:
+                    media = await self._downloader.download(
+                        episode.source_url, attempt / "source", cancel_check
+                    )
                 media = self._bounded_path(media, "download path")
             elif episode.source_type == "upload":
                 if not episode.source_path:
@@ -337,7 +366,8 @@ class SourceIngestor:
             _raise_if_canceled(cancel_check)
             _report(progress, 20)
             return PreparedSource(
-                media, metadata[0], metadata[1], metadata[3], poster, poster_type
+                media, metadata[0], metadata[1], metadata[3], poster, poster_type,
+                source_title,
             )
         except (JobCanceled, asyncio.CancelledError, SourceIngestError):
             await _remove_attempt(attempt, expected_attempt, self._data_dir)
@@ -692,7 +722,8 @@ class SSRFProxy:
         self._cancel_check = cancel_check
         self._timeouts = timeouts or TimeoutPolicy()
         self._max_tunnel_bytes = max_tunnel_bytes
-        self._token = secrets.token_urlsafe(24)
+        self._username = secrets.token_urlsafe(24)
+        self._password = secrets.token_urlsafe(24)
         self._server = None
         self._handlers: set[asyncio.Task] = set()
         self._closing = False
@@ -704,7 +735,9 @@ class SSRFProxy:
             self._on_client, "127.0.0.1", 0, limit=32 * 1024
         )
         port = self._server.sockets[0].getsockname()[1]
-        self.proxy_url = f"http://{self._token}:@127.0.0.1:{port}"
+        self.proxy_url = (
+            f"http://{self._username}:{self._password}@127.0.0.1:{port}"
+        )
         return self
 
     async def __aexit__(self, *args):
@@ -793,7 +826,9 @@ class SSRFProxy:
             )
             if len(header) > 32 * 1024:
                 raise DownloadError("Proxy request headers are too large")
-            host, port = _parse_connect_request(header, self._token)
+            host, port = _parse_connect_request(
+                header, self._username, self._password
+            )
             upstream_reader, upstream = await self.connect_target(
                 host, port, self._cancel_check
             )
@@ -851,57 +886,160 @@ class YtDlpDownloader:
 
     def __init__(
         self,
-        runner: ProcessRunner,
-        media_downloader: Downloader,
         page_validator: URLValidator,
         *,
         max_bytes: int = 5 * 1024**3,
         timeout_sec: float = 120.0,
         proxy_factory=None,
+        youtube_dl_factory=None,
+        thread_runner=run_owned_to_thread,
+        egress_proxy: str | None = None,
     ):
-        self._runner = runner
-        self._media = media_downloader
         self._validator = page_validator
         self._max_bytes = max_bytes
         self._timeout = timeout_sec
         self._proxy_factory = proxy_factory or (
             lambda cancel_check: SSRFProxy(cancel_check=cancel_check)
         )
+        self._youtube_dl_factory = youtube_dl_factory or yt_dlp.YoutubeDL
+        self._thread_runner = thread_runner
+        # Opt-in upstream proxy (e.g. a local system proxy) for networks where
+        # platform pages are unreachable through the pinned direct tunnel.
+        self._egress_proxy = egress_proxy
 
     async def download(
         self, url: str, directory: Path, cancel_check: CancelCheck,
         progress: ProgressCallback | None = None,
     ) -> Path:
+        fetched = await self.download_with_metadata(
+            url, directory, cancel_check, progress
+        )
+        return fetched.path
+
+    async def download_with_metadata(
+        self, url: str, directory: Path, cancel_check: CancelCheck,
+        progress: ProgressCallback | None = None,
+    ) -> DownloadedMedia:
         parsed, _ = _validated_remote_url(url)
         host = parsed.hostname.lower().rstrip(".")
         if not any(host == allowed or host.endswith("." + allowed) for allowed in self._PLATFORM_HOSTS):
             raise DownloadError("Unsupported page URL")
         await self._validator.validate_url(url, cancel_check)
-        async with self._proxy_factory(cancel_check) as proxy:
-            result = await self._runner.run(
-                (
-                    "yt-dlp", "--no-config", "--no-plugin-dirs", "--no-playlist",
-                    "--skip-download", "--dump-single-json", "--no-warnings",
-                    "--socket-timeout", "15", "--max-filesize", str(self._max_bytes),
-                    "--proxy", proxy.proxy_url, "--", url,
-                ),
-                cancel_check,
-                timeout_sec=self._timeout,
-                env=_clean_subprocess_env(),
-            )
-        if result.returncode != 0:
-            raise DownloadError("Unable to resolve media page")
+        target = Path(directory)
+        await self._thread_runner(target.mkdir, parents=True, exist_ok=True)
         try:
-            document = json.loads(result.stdout)
-            media_url = document["url"]
-            if not isinstance(media_url, str):
-                raise TypeError
-        except (json.JSONDecodeError, KeyError, TypeError):
-            raise DownloadError("Unable to resolve media page") from None
-        _validated_remote_url(media_url)
-        return await self._media.download(
-            media_url, directory, cancel_check, progress
-        )
+            if self._egress_proxy is not None:
+                title = await self._thread_runner(
+                    self._download_sync,
+                    url,
+                    target,
+                    self._egress_proxy,
+                    cancel_check,
+                    progress,
+                )
+            else:
+                async with self._proxy_factory(cancel_check) as proxy:
+                    title = await self._thread_runner(
+                        self._download_sync,
+                        url,
+                        target,
+                        proxy.proxy_url,
+                        cancel_check,
+                        progress,
+                    )
+            path = await self._thread_runner(
+                self._validate_single_output, target
+            )
+            return DownloadedMedia(path, title)
+        except (JobCanceled, asyncio.CancelledError):
+            await self._thread_runner(_remove_directory_contents, target)
+            raise
+        except Exception:
+            await self._thread_runner(_remove_directory_contents, target)
+            raise DownloadError("Unable to download media page") from None
+
+    def _download_sync(
+        self,
+        url: str,
+        directory: Path,
+        proxy_url: str,
+        cancel_check: CancelCheck,
+        progress: ProgressCallback | None,
+    ) -> str | None:
+        def progress_hook(state) -> None:
+            if cancel_check():
+                raise JobCanceled
+            if progress is None or state.get("status") != "downloading":
+                return
+            downloaded = state.get("downloaded_bytes")
+            if isinstance(downloaded, (int, float)) and math.isfinite(downloaded):
+                progress(max(0, min(self._max_bytes, int(downloaded))))
+
+        options = {
+            "format": "bestaudio/best",
+            "outtmpl": str(directory / "media.%(ext)s"),
+            "proxy": proxy_url,
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": True,
+            "cachedir": False,
+            "socket_timeout": min(15.0, self._timeout),
+            "max_filesize": self._max_bytes,
+            "retries": 1,
+            "fragment_retries": 1,
+            "extractor_retries": 1,
+            "overwrites": False,
+            "progress_hooks": [progress_hook],
+        }
+        with self._youtube_dl_factory(options) as downloader:
+            info = downloader.extract_info(url, download=True)
+        return _sanitize_title(info.get("title") if isinstance(info, dict) else None)
+
+    def _validate_single_output(self, directory: Path) -> Path:
+        root = directory.resolve()
+        children = list(directory.iterdir())
+        if len(children) != 1:
+            raise DownloadError("Media download output is invalid")
+        output = children[0]
+        if (
+            output.is_symlink()
+            or not output.is_file()
+            or output.suffix.lower() not in _SAFE_INPUTS
+            or output.stat().st_size > self._max_bytes
+        ):
+            raise DownloadError("Media download output is invalid")
+        resolved = output.resolve()
+        if resolved.parent != root:
+            raise DownloadError("Media download output is invalid")
+        return resolved
+
+
+def _remove_directory_contents(directory: Path) -> None:
+    if not directory.exists():
+        return
+    for child in directory.iterdir():
+        try:
+            if child.is_symlink() or not child.is_dir():
+                child.unlink()
+            else:
+                shutil.rmtree(child)
+        except FileNotFoundError:
+            pass
+
+
+_TITLE_MAX_LENGTH = 200
+_TITLE_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def _sanitize_title(value: object) -> str | None:
+    """Normalize an extractor-reported title into a safe Episode title."""
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(_TITLE_CONTROL_CHARS.sub(" ", value).split())
+    if not cleaned:
+        return None
+    return cleaned[:_TITLE_MAX_LENGTH].rstrip() or None
 
 
 def _validated_remote_url(url: str):
@@ -929,7 +1067,9 @@ _CONNECT_LINE = re.compile(rb"CONNECT ([^ ]+) HTTP/(1\.[01])\Z")
 _DNS_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
 
 
-def _parse_connect_request(header: bytes, token: str) -> tuple[str, int]:
+def _parse_connect_request(
+    header: bytes, username: str, password: str
+) -> tuple[str, int]:
     if len(header) > 32 * 1024 or not header.endswith(b"\r\n\r\n"):
         raise DownloadError("Proxy request is invalid")
     if b"\x00" in header or b"\n" in header.replace(b"\r\n", b""):
@@ -956,8 +1096,12 @@ def _parse_connect_request(header: bytes, token: str) -> tuple[str, int]:
         if any(byte < 32 and byte != 9 or byte == 127 for byte in value):
             raise DownloadError("Proxy request is invalid")
         fields[key] = value
-    expected = b"Basic " + base64.b64encode(f"{token}:".encode("ascii"))
-    if fields.get(b"proxy-authorization") != expected:
+    expected = b"Basic " + base64.b64encode(
+        f"{username}:{password}".encode("ascii")
+    )
+    if not secrets.compare_digest(
+        fields.get(b"proxy-authorization", b""), expected
+    ):
         raise DownloadError("Proxy authentication failed")
     return _split_connect_authority(authority)
 

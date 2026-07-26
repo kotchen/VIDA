@@ -1,3 +1,11 @@
+FROM node:22-bookworm-slim AS frontend-build
+
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
 # AI视频转录器 Docker镜像 — Python 与本地推荐环境对齐（3.12），依赖与 requirements.txt 一致
 FROM python:3.12-slim-bookworm
 
@@ -19,6 +27,7 @@ RUN python -m pip install --upgrade pip setuptools wheel \
 
 # 复制项目文件
 COPY . .
+COPY --from=frontend-build /frontend/dist /app/frontend/dist
 
 # 创建临时目录
 RUN mkdir -p temp
@@ -27,6 +36,10 @@ RUN mkdir -p temp
 ENV HOST=0.0.0.0
 ENV PORT=8000
 ENV WHISPER_MODEL_SIZE=base
+ENV WHISPER_MODEL_LOAD_TIMEOUT_SEC=300
+ENV HF_HUB_DISABLE_XET=1
+ENV HF_HUB_ETAG_TIMEOUT=10
+ENV HF_HUB_DOWNLOAD_TIMEOUT=60
 ENV UPLOAD_MAX_MB=200
 
 # 暴露端口

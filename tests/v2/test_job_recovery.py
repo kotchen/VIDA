@@ -8,6 +8,7 @@ from unittest.mock import patch
 from fastapi import FastAPI
 
 from backend.v2.bootstrap import build_test_runtime
+from backend.v2.container import V2Runtime
 from backend.v2.database import Database
 from backend.v2.domain import JobRecord
 from backend.v2.jobs.scheduler import Scheduler
@@ -322,6 +323,50 @@ class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
         async with app.router.lifespan_context(app):
             self.assertEqual(runtime.scheduler.worker_count, 3)
         self.assertEqual(runtime.scheduler.worker_count, 0)
+
+    async def test_runtime_awaits_readiness_before_starting_scheduler(self):
+        order = []
+
+        async def readiness():
+            order.append("ready")
+
+        class RecordingScheduler:
+            async def start(self, *args):
+                order.append("scheduler")
+
+        runtime = V2Runtime(
+            provider_profile_service=object(),
+            scheduler=RecordingScheduler(),
+            _readiness=readiness,
+        )
+
+        await runtime.start()
+
+        self.assertEqual(order, ["ready", "scheduler"])
+
+    async def test_runtime_does_not_start_scheduler_when_readiness_fails(self):
+        started = False
+
+        async def readiness():
+            raise RuntimeError("Whisper model initialization failed")
+
+        class RecordingScheduler:
+            async def start(self, *args):
+                nonlocal started
+                started = True
+
+        runtime = V2Runtime(
+            provider_profile_service=object(),
+            scheduler=RecordingScheduler(),
+            _readiness=readiness,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError, "^Whisper model initialization failed$"
+        ):
+            await runtime.start()
+
+        self.assertFalse(started)
 
     def _seed(self) -> None:
         with self.database.transaction() as conn:

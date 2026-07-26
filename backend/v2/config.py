@@ -14,6 +14,7 @@ class V2Settings:
     max_concurrent_jobs: int
     upload_max_bytes: int
     master_key: bytes
+    platform_egress_proxy: str | None = None
 
     @classmethod
     def from_environ(cls, environ: Mapping[str, str], project_root: Path) -> "V2Settings":
@@ -42,5 +43,22 @@ class V2Settings:
             raise ValueError("VIDA_PROFILE_MASTER_KEY must be URL-safe Base64")
         if len(master_key) != 32:
             raise ValueError("VIDA_PROFILE_MASTER_KEY must decode to exactly 32 bytes")
+        egress_proxy = _parse_egress_proxy(environ.get("V2_PLATFORM_EGRESS_PROXY", ""))
         data_dir = project_root / "data" / "v2"
-        return cls(data_dir, data_dir / "vida-v2.sqlite3", workers, upload_gb * 1024**3, master_key)
+        return cls(
+            data_dir, data_dir / "vida-v2.sqlite3", workers, upload_gb * 1024**3,
+            master_key, egress_proxy,
+        )
+
+
+def _parse_egress_proxy(raw: str) -> str | None:
+    """Optional upstream proxy for platform page/media/subtitle fetching."""
+    value = raw.strip()
+    if not value:
+        return None
+    match = re.fullmatch(r"https?://[A-Za-z0-9._-]+:\d{1,5}/?", value)
+    if match is None or not (1 <= int(value.rsplit(":", 1)[1].rstrip("/")) <= 65535):
+        raise ValueError(
+            "V2_PLATFORM_EGRESS_PROXY must look like http://127.0.0.1:7897"
+        )
+    return value.rstrip("/")

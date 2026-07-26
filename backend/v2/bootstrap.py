@@ -16,15 +16,18 @@ else:
     from ..transcriber import Transcriber
 
 from .config import V2Settings
-from .container import ProviderTestResult, V2Runtime
+from .container import ProviderModelFetchResult, ProviderTestResult, V2Runtime
 from .crypto import CredentialCipher
 from .database import Database
 from .errors import V2Error
+from .events import V2EventBroker
 from .jobs.models import JobExecutor
 from .jobs.ai import AIProcessor
 from .jobs.pipeline import EpisodePipeline
+from .jobs.subtitles import PlatformSubtitleFetcher
 from .jobs.source_ingest import (
     AsyncioProcessRunner,
+    DownloadedMedia,
     SecureDownloader,
     SourceIngestor,
     YtDlpDownloader,
@@ -42,9 +45,17 @@ from .services.provider_profiles import (
 )
 
 
-def install_v2(app: FastAPI, project_root: Path) -> V2Runtime:
+def install_v2(
+    app: FastAPI,
+    project_root: Path,
+    transcriber: Transcriber | None = None,
+) -> V2Runtime:
     root = Path(project_root)
-    runtime = V2Runtime(_initializer=lambda: _build_environment_runtime(root))
+    events = V2EventBroker()
+    runtime = V2Runtime(
+        events=events,
+        _initializer=lambda: _build_environment_runtime(root, events, transcriber),
+    )
     runtime.install(app)
     return runtime
 
@@ -67,32 +78,55 @@ def build_test_runtime(
     return _build_runtime(settings, executor)
 
 
-def _build_environment_runtime(project_root: Path) -> V2Runtime:
-    return _build_runtime(V2Settings.from_environ(os.environ, project_root))
+def _build_environment_runtime(
+    project_root: Path,
+    events: V2EventBroker | None = None,
+    transcriber: Transcriber | None = None,
+) -> V2Runtime:
+    return _build_runtime(
+        V2Settings.from_environ(os.environ, project_root),
+        events=events,
+        transcriber=transcriber,
+        preload_model=True,
+    )
 
 
 def _build_runtime(
-    settings: V2Settings, executor: JobExecutor | None = None
+    settings: V2Settings,
+    executor: JobExecutor | None = None,
+    events: V2EventBroker | None = None,
+    transcriber: Transcriber | None = None,
+    preload_model: bool = False,
 ) -> V2Runtime:
+    event_broker = events or V2EventBroker()
     database = Database(settings.database_path)
     database.initialize()
     repository = ProviderProfileRepository(database)
-    service = ProviderProfileService(repository, CredentialCipher(settings.master_key))
-    job_repository = JobRepository(database)
+    service = ProviderProfileService(
+        repository, CredentialCipher(settings.master_key), event_broker.publish
+    )
+    job_repository = JobRepository(database, event_broker.publish)
     episode_repository = EpisodeRepository(database)
     chapter_repository = ChapterRepository(database)
-    episode_service = EpisodeService(
-        episode_repository, job_repository, database, settings.data_dir, chapter_repository
-    )
     media_service = MediaService(settings.data_dir, [episode_repository])
+    episode_service = EpisodeService(
+        episode_repository,
+        job_repository,
+        database,
+        settings.data_dir,
+        chapter_repository,
+        event_broker.publish,
+        media_service,
+    )
+    readiness = None
     if executor is None:
+        _disable_yt_dlp_plugins()
         process_runner = AsyncioProcessRunner()
         secure_downloader = SecureDownloader(max_bytes=settings.upload_max_bytes)
         page_downloader = YtDlpDownloader(
-            process_runner,
-            secure_downloader,
             secure_downloader,
             max_bytes=settings.upload_max_bytes,
+            egress_proxy=settings.platform_egress_proxy,
         )
         source_ingestor = SourceIngestor(
             process_runner,
@@ -100,6 +134,7 @@ def _build_runtime(
             data_dir=settings.data_dir,
             audio_poster=Path(__file__).resolve().parents[2] / "static" / "sipsip.png",
         )
+        speech_transcriber = transcriber or Transcriber()
         job_executor = EpisodePipeline(
             data_dir=settings.data_dir,
             profiles=service,
@@ -108,10 +143,16 @@ def _build_runtime(
             jobs=job_repository,
             media=media_service,
             source=source_ingestor,
-            transcriber=Transcriber(),
+            transcriber=speech_transcriber,
             ai_factory=AIProcessor,
+            subtitles=PlatformSubtitleFetcher(
+                secure_downloader,
+                egress_proxy=settings.platform_egress_proxy,
+            ),
             now=_utc_now,
         )
+        if preload_model:
+            readiness = speech_transcriber.preload
     else:
         job_executor = executor
     scheduler = Scheduler(
@@ -121,6 +162,7 @@ def _build_runtime(
         poll_interval_sec=1.0,
     )
     return V2Runtime(
+        events=event_broker,
         settings=settings,
         database=database,
         job_repository=job_repository,
@@ -133,7 +175,15 @@ def _build_runtime(
         episode_service=episode_service,
         media_service=media_service,
         provider_tester=test_provider_connection,
+        provider_model_fetcher=fetch_provider_models,
+        _readiness=readiness,
     )
+
+
+def _disable_yt_dlp_plugins() -> None:
+    from yt_dlp.globals import plugin_dirs
+
+    plugin_dirs.value = []
 
 
 class _RoutingDownloader:
@@ -141,14 +191,26 @@ class _RoutingDownloader:
         self._direct = direct
         self._page = page
 
-    async def download(self, url, directory, cancel_check, progress=None):
+    def _pick(self, url):
         host = (urlsplit(url).hostname or "").lower().rstrip(".")
         platform = any(
             host == allowed or host.endswith("." + allowed)
             for allowed in YtDlpDownloader._PLATFORM_HOSTS
         )
-        downloader = self._page if platform else self._direct
+        return (self._page if platform else self._direct), platform
+
+    async def download(self, url, directory, cancel_check, progress=None):
+        downloader, _ = self._pick(url)
         return await downloader.download(url, directory, cancel_check, progress)
+
+    async def download_with_metadata(self, url, directory, cancel_check, progress=None):
+        downloader, platform = self._pick(url)
+        if platform:
+            return await downloader.download_with_metadata(
+                url, directory, cancel_check, progress
+            )
+        path = await downloader.download(url, directory, cancel_check, progress)
+        return DownloadedMedia(path, None)
 
 
 def _utc_now() -> str:
@@ -182,3 +244,39 @@ async def test_provider_connection(
         else "Connection successful, but configured model was not found"
     )
     return True, latency_ms, available, message
+
+
+async def fetch_provider_models(
+    base_url: str,
+    api_key: str,
+) -> ProviderModelFetchResult:
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=15.0)
+    try:
+        started = time.monotonic()
+        response = await asyncio.to_thread(client.models.list)
+        latency_ms = max(0, round((time.monotonic() - started) * 1000))
+        models = _normalize_provider_models(response.data)
+    finally:
+        await asyncio.to_thread(client.close)
+    return models, latency_ms
+
+
+def _normalize_provider_models(rows) -> list[tuple[str, str]]:
+    unique: dict[str, tuple[str, str]] = {}
+    for row in rows:
+        model_id = getattr(row, "id", None)
+        if not isinstance(model_id, str):
+            continue
+        model_id = model_id.strip()
+        if not model_id or len(model_id) > 512 or model_id in unique:
+            continue
+        raw_name = getattr(row, "name", None)
+        name = raw_name.strip() if isinstance(raw_name, str) else ""
+        if not name:
+            name = model_id
+        if len(name) > 512:
+            continue
+        unique[model_id] = (model_id, name)
+        if len(unique) == 2000:
+            break
+    return sorted(unique.values(), key=lambda item: (item[0].casefold(), item[0]))

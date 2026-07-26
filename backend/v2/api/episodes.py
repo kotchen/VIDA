@@ -155,6 +155,11 @@ def create_episode_router(runtime: V2Runtime) -> APIRouter:
             for episode in runtime.require_episodes().list_projects(limit, offset)
         ]
 
+    @router.delete("/{episode_id}", status_code=204)
+    def delete_episode(episode_id: str):
+        runtime.require_episodes().delete_episode(episode_id)
+        return Response(status_code=204)
+
     @router.get("/{episode_id}", response_model=EpisodeResponse)
     def get_episode(episode_id: str):
         service = runtime.require_episodes()
@@ -197,7 +202,11 @@ def create_episode_router(runtime: V2Runtime) -> APIRouter:
     def update_chapter(episode_id: str, chapter_id: str, payload: ChapterUpdate):
         service = runtime.require_episodes()
         updated = service.update_chapter(
-            episode_id, chapter_id, start_sec=payload.start_sec, title=payload.title
+            episode_id,
+            chapter_id,
+            start_sec=payload.start_sec,
+            title=payload.title,
+            bookmarked=payload.bookmarked,
         )
         episode = service.get_episode(episode_id)
         rows = service.get_chapters(episode_id)
@@ -355,6 +364,7 @@ def _response(submission: EpisodeSubmission) -> EpisodeSubmissionResponse:
         id=episode.id,
         title=episode.title,
         source_type=episode.source_type,
+        source_url=episode.source_url,
         media_url=None,
         poster_url=None,
         duration_sec=episode.duration_sec or 0,
@@ -373,6 +383,7 @@ def _response(submission: EpisodeSubmission) -> EpisodeSubmissionResponse:
 def _episode_response(episode, queue_position: int | None) -> EpisodeResponse:
     return EpisodeResponse(
         id=episode.id, title=episode.title, source_type=episode.source_type,
+        source_url=episode.source_url,
         media_url=(None if episode.media_path is None else f"/api/v2/episodes/{episode.id}/media"),
         poster_url=(None if episode.poster_path is None else f"/api/v2/episodes/{episode.id}/poster"),
         duration_sec=episode.duration_sec or 0, resolution=episode.resolution,
@@ -426,6 +437,7 @@ def _chapter_responses(episode, rows) -> list[ChapterResponse]:
                 else f"/api/v2/episodes/{episode.id}/poster"
             ),
             bookmarked=row.bookmarked,
+            source=row.source,
         ))
     return result
 

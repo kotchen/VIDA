@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import os
 import sys
 import tempfile
 import threading
@@ -11,6 +12,118 @@ from unittest.mock import patch
 
 
 class TranscriberAsyncTests(unittest.IsolatedAsyncioTestCase):
+    def test_huggingface_defaults_preserve_explicit_operator_values(self):
+        from backend.whisper_environment import configure_huggingface_environment
+
+        environ = {
+            "HF_HUB_DISABLE_XET": "0",
+            "HF_HUB_DOWNLOAD_TIMEOUT": "90",
+        }
+        configure_huggingface_environment(environ)
+
+        self.assertEqual(environ["HF_HUB_DISABLE_XET"], "0")
+        self.assertEqual(environ["HF_HUB_DOWNLOAD_TIMEOUT"], "90")
+        self.assertEqual(environ["HF_HUB_ETAG_TIMEOUT"], "10")
+
+    def test_transcriber_reads_model_and_timeout_from_environment(self):
+        fake_faster_whisper = types.ModuleType("faster_whisper")
+        fake_faster_whisper.WhisperModel = object
+        with patch.dict(sys.modules, {"faster_whisper": fake_faster_whisper}), patch.dict(
+            os.environ,
+            {
+                "WHISPER_MODEL_SIZE": "small",
+                "WHISPER_MODEL_LOAD_TIMEOUT_SEC": "42",
+            },
+            clear=False,
+        ):
+            sys.modules.pop("backend.transcriber", None)
+            module = importlib.import_module("backend.transcriber")
+            transcriber = module.Transcriber()
+
+        self.assertEqual(transcriber.model_size, "small")
+        self.assertEqual(transcriber.model_load_timeout_sec, 42.0)
+
+    def test_huggingface_defaults_are_set_before_whisper_import(self):
+        observed = []
+
+        class ObservingModule(types.ModuleType):
+            def __getattribute__(self, name):
+                if name == "WhisperModel":
+                    observed.append(os.environ.get("HF_HUB_DISABLE_XET"))
+                return super().__getattribute__(name)
+
+        fake_faster_whisper = ObservingModule("faster_whisper")
+        fake_faster_whisper.WhisperModel = object
+        with patch.dict(sys.modules, {"faster_whisper": fake_faster_whisper}), patch.dict(
+            os.environ, {}, clear=False
+        ):
+            os.environ.pop("HF_HUB_DISABLE_XET", None)
+            sys.modules.pop("backend.transcriber", None)
+            importlib.import_module("backend.transcriber")
+
+        self.assertEqual(observed, ["1"])
+
+    def test_transcriber_rejects_invalid_model_load_timeouts(self):
+        fake_faster_whisper = types.ModuleType("faster_whisper")
+        fake_faster_whisper.WhisperModel = object
+        with patch.dict(sys.modules, {"faster_whisper": fake_faster_whisper}):
+            sys.modules.pop("backend.transcriber", None)
+            module = importlib.import_module("backend.transcriber")
+
+        for invalid in (0, -1, float("nan"), float("inf"), "invalid"):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError,
+                "^WHISPER_MODEL_LOAD_TIMEOUT_SEC must be a positive number$",
+            ):
+                module.Transcriber(model_load_timeout_sec=invalid)
+
+    async def test_preload_timeout_is_sanitized(self):
+        fake_faster_whisper = types.ModuleType("faster_whisper")
+        fake_faster_whisper.WhisperModel = object
+        with patch.dict(sys.modules, {"faster_whisper": fake_faster_whisper}):
+            sys.modules.pop("backend.transcriber", None)
+            module = importlib.import_module("backend.transcriber")
+
+        release = threading.Event()
+
+        class SlowModel:
+            def __init__(self, *args, **kwargs):
+                release.wait(timeout=1)
+
+        module.WhisperModel = SlowModel
+        transcriber = module.Transcriber(model_load_timeout_sec=0.02)
+        try:
+            with self.assertRaisesRegex(
+                RuntimeError, "^Whisper model initialization timed out$"
+            ):
+                await transcriber.preload()
+        finally:
+            release.set()
+            await asyncio.sleep(0.05)
+
+    async def test_preload_constructor_failure_is_sanitized(self):
+        fake_faster_whisper = types.ModuleType("faster_whisper")
+        fake_faster_whisper.WhisperModel = object
+        with patch.dict(sys.modules, {"faster_whisper": fake_faster_whisper}):
+            sys.modules.pop("backend.transcriber", None)
+            module = importlib.import_module("backend.transcriber")
+
+        class FailingModel:
+            def __init__(self, *args, **kwargs):
+                raise RuntimeError(
+                    "https://proxy.example/secret /private/cache/model.bin"
+                )
+
+        module.WhisperModel = FailingModel
+        transcriber = module.Transcriber()
+        with self.assertRaisesRegex(
+            RuntimeError, "^Whisper model initialization failed$"
+        ) as caught:
+            await transcriber.preload()
+
+        self.assertNotIn("proxy.example", str(caught.exception))
+        self.assertNotIn("/private/cache", str(caught.exception))
+
     async def test_legacy_markdown_keeps_headings_timestamps_and_language(self):
         fake_faster_whisper = types.ModuleType("faster_whisper")
         fake_faster_whisper.WhisperModel = object

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -113,6 +113,39 @@ class ProviderConnectionTestResponse(ApiModel):
     message: str
 
 
+class ProviderModelDiscoveryRequest(ApiModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: ProviderProfileIdString | None = None
+    base_url: HttpUrl
+    api_key: SecretStr | None = None
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def validate_api_key(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                raise ValueError("apiKey must not be empty")
+        return value
+
+    @model_validator(mode="after")
+    def require_credentials(self) -> "ProviderModelDiscoveryRequest":
+        if self.profile_id is None and self.api_key is None:
+            raise ValueError("profileId or apiKey is required")
+        return self
+
+
+class ProviderModelOptionResponse(ApiModel):
+    id: str
+    name: str
+
+
+class ProviderModelDiscoveryResponse(ApiModel):
+    models: list[ProviderModelOptionResponse]
+    latency_ms: int = Field(ge=0)
+
+
 class EpisodeUrlSubmission(ApiModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -134,6 +167,7 @@ class EpisodeSubmissionResponse(ApiModel):
     id: str
     title: str
     source_type: str
+    source_url: str | None = None
     media_url: str | None = None
     poster_url: str | None = None
     duration_sec: float = 0
@@ -182,6 +216,7 @@ class ChapterResponse(ApiModel):
     duration_sec: float
     thumbnail_url: str | None
     bookmarked: bool
+    source: Literal["generated", "manual"]
 
 
 class ChapterCreate(ApiModel):
@@ -196,6 +231,7 @@ class ChapterUpdate(ApiModel):
 
     start_sec: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     title: ChapterTitleString | None = None
+    bookmarked: bool | None = None
 
     @model_validator(mode="after")
     def require_change(self) -> "ChapterUpdate":

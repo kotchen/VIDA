@@ -1,5 +1,6 @@
 import { Captions, FileCode, FileText } from "lucide-react"
 import { Card } from "@/components/ui/card"
+import { episodesApi } from "@/api/episodes"
 
 const FORMATS = [
   { icon: FileText, name: "TXT", ext: ".txt" },
@@ -7,7 +8,7 @@ const FORMATS = [
   { icon: FileCode, name: "MD", ext: ".md" },
 ]
 
-export function ExportCard() {
+export function ExportCard({ episodeId }: { episodeId?: string }) {
   return (
     <Card className="card-glow flex h-full flex-col gap-3 rounded-2xl border-warm/60 bg-card p-4">
       <div>
@@ -16,15 +17,15 @@ export function ExportCard() {
       </div>
       <div className="grid flex-1 grid-cols-3 gap-3">
         {FORMATS.map(({ icon: Icon, name, ext }) => (
-          <button
+          <a
             key={name}
-            type="button"
+            href={episodeId ? episodesApi.exportUrl(episodeId, name.toLowerCase() as "txt" | "srt" | "md") : undefined}
             className="flex flex-col items-center justify-center gap-1.5 rounded-xl border border-warm/60 bg-raised transition-colors hover:border-copper-500/60"
           >
             <Icon className="size-6 text-copper-300" strokeWidth={1.5} />
             <span className="text-sm font-semibold">{name}</span>
             <span className="text-[10px] text-muted-warm">{ext}</span>
-          </button>
+          </a>
         ))}
       </div>
       <p className="text-center text-[10px] text-muted-warm/70">+ More formats coming soon</p>

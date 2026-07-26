@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..crypto import CredentialCipher
+from ..events import EventPublisher, ignore_event
 from ..repositories.provider_profiles import (
     ProviderProfileRecord,
     ProviderProfileRepository,
@@ -35,9 +36,15 @@ class ProviderRevisionCredentials:
 
 
 class ProviderProfileService:
-    def __init__(self, repository: ProviderProfileRepository, cipher: CredentialCipher):
+    def __init__(
+        self,
+        repository: ProviderProfileRepository,
+        cipher: CredentialCipher,
+        publish: EventPublisher = ignore_event,
+    ):
         self._repository = repository
         self._cipher = cipher
+        self._publish = publish
 
     def create_profile(
         self,
@@ -50,7 +57,9 @@ class ProviderProfileService:
         record = self._repository.create(
             name, base_url, self._cipher.encrypt(api_key), model_id, temperature
         )
-        return self._to_profile(record, api_key)
+        profile = self._to_profile(record, api_key)
+        self._publish("profiles.invalidated", {})
+        return profile
 
     def update_profile(
         self,
@@ -72,10 +81,13 @@ class ProviderProfileService:
             temperature=temperature,
         )
         plaintext = api_key or self._cipher.decrypt(record.encrypted_credential)
-        return self._to_profile(record, plaintext)
+        profile = self._to_profile(record, plaintext)
+        self._publish("profiles.invalidated", {})
+        return profile
 
     def delete_profile(self, profile_id: str) -> None:
         self._repository.delete(profile_id)
+        self._publish("profiles.invalidated", {})
 
     def get_profile(self, profile_id: str) -> ProviderProfile | None:
         record = self._repository.get(profile_id)

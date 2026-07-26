@@ -7,12 +7,14 @@ Video Intelligence, Dialogue, Analysis — the VIDA 2.0 web frontend.
 ## Commands
 
 ```bash
-npm install     # install dependencies
-npm run dev     # start dev server → http://localhost:7100
+npm ci          # install locked dependencies
+npm run dev     # Vite + /api proxy → http://localhost:7100/v2/
 npm test        # run tests (vitest)
 npm run build   # production build
 ```
 
 ## Notes
 
-All data is currently mocked via a MockProvider pending the v2 API. See the API contract at `docs/api/v2-api-contract.md` (repo root).
+Production assets are built with base `/v2/` and served by FastAPI. The UI uses
+relative `/api/v2/*` requests and one `/api/v2/events` EventSource. See
+`docs/api/v2-api-contract.md` at the repository root.

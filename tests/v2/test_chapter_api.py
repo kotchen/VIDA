@@ -55,6 +55,10 @@ class ChapterApiTests(unittest.TestCase):
         )
         listed = self.client.get(f"/api/v2/episodes/{self.episode_id}/chapters").json()
         self.assertEqual([row["title"] for row in listed], ["Manual", "Generated"])
+        self.assertEqual(
+            [row["source"] for row in listed],
+            ["manual", "generated"],
+        )
 
     def test_create_validates_finite_episode_bounds_and_nonempty_title(self):
         for payload in (
@@ -142,6 +146,63 @@ class ChapterApiTests(unittest.TestCase):
         self.assertEqual(self._stored_durations(), {
             first["id"]: 40, "generated": 50,
         })
+
+    def test_bookmark_updates_generated_and_manual_chapters_and_persists(self):
+        manual = self.client.post(
+            f"/api/v2/episodes/{self.episode_id}/chapters",
+            json={"startSec": 20, "title": "Manual"},
+        ).json()
+
+        for chapter_id in ("generated", manual["id"]):
+            response = self.client.patch(
+                f"/api/v2/episodes/{self.episode_id}/chapters/{chapter_id}",
+                json={"bookmarked": True},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json()["bookmarked"])
+
+        listed = self.client.get(
+            f"/api/v2/episodes/{self.episode_id}/chapters"
+        ).json()
+        self.assertTrue(all(row["bookmarked"] for row in listed))
+
+    def test_generated_mixed_update_is_atomic_and_does_not_change_bookmark(self):
+        response = self.client.patch(
+            f"/api/v2/episodes/{self.episode_id}/chapters/generated",
+            json={"title": "Changed", "bookmarked": True},
+        )
+
+        self.assertEqual(
+            (response.status_code, response.json()["error"]["code"]),
+            (409, "generated_chapter_immutable"),
+        )
+        stored = self.client.get(
+            f"/api/v2/episodes/{self.episode_id}/chapters"
+        ).json()
+        generated = next(row for row in stored if row["id"] == "generated")
+        self.assertEqual(generated["title"], "Generated")
+        self.assertFalse(generated["bookmarked"])
+
+    def test_bookmark_update_enforces_ownership_and_rejects_empty_or_null(self):
+        wrong = self.client.patch(
+            f"/api/v2/episodes/{self.other_id}/chapters/generated",
+            json={"bookmarked": True},
+        )
+        self.assertEqual(
+            (wrong.status_code, wrong.json()["error"]["code"]),
+            (404, "chapter_not_found"),
+        )
+
+        for payload in ({}, {"bookmarked": None}):
+            with self.subTest(payload=payload):
+                response = self.client.patch(
+                    f"/api/v2/episodes/{self.episode_id}/chapters/generated",
+                    json=payload,
+                )
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(
+                    response.json()["error"]["code"], "validation_error"
+                )
 
     def _stored_durations(self):
         with self.runtime.database.connect() as conn:

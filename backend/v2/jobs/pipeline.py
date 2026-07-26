@@ -6,6 +6,7 @@ import math
 import shutil
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from ..domain import JobRecord, ProcessingWarning, TranscriptSegmentRecord
@@ -27,6 +28,7 @@ class EpisodePipeline:
         source,
         transcriber,
         ai_factory,
+        subtitles=None,
         heartbeat_interval_sec: float = 5.0,
         now: Callable[[], str],
     ):
@@ -41,6 +43,7 @@ class EpisodePipeline:
         self._source = source
         self._transcriber = transcriber
         self._ai_factory = ai_factory
+        self._subtitles = subtitles
         self._heartbeat_interval = heartbeat_interval_sec
         self._now = now
 
@@ -72,11 +75,46 @@ class EpisodePipeline:
         except Exception:
             await _remove_attempt(attempt, attempt, self._data_dir)
             raise
+        title = episode.title
+        if prepared.source_title and _is_fallback_title(episode):
+            title = prepared.source_title
+            try:
+                await run_owned_to_thread(
+                    self._episodes.set_title, episode.id, title, self._now()
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                raise PipelinePersistenceError(
+                    "Pipeline persistence failed"
+                ) from None
         try:
-            transcription = await self._stage(
-                job, 20, "Transcribing", cancel_check,
-                self._transcriber.transcribe_segments(str(prepared.media_path)),
-            )
+            transcription = None
+            if (
+                self._subtitles is not None
+                and episode.source_type == "url"
+                and episode.source_url
+            ):
+                try:
+                    transcription = await self._stage(
+                        job, 20, "Fetching platform subtitles", cancel_check,
+                        self._subtitles.fetch(
+                            episode.source_url,
+                            episode.summary_language,
+                            attempt / "subtitles",
+                            cancel_check,
+                        ),
+                    )
+                except (JobCanceled, asyncio.CancelledError):
+                    await _remove_attempt(attempt, attempt, self._data_dir)
+                    raise
+                except Exception:
+                    transcription = None
+            if transcription is None:
+                transcription = await self._stage(
+                    job, 20, "Transcribing", cancel_check,
+                    self._transcriber.transcribe_segments(str(prepared.media_path)),
+                )
             if not transcription.segments:
                 raise ValueError("empty transcription")
             validated_segments = _validate_segments(transcription.segments)
@@ -147,7 +185,7 @@ class EpisodePipeline:
             summary = await self._stage(
                 job, 72, "Generating summary", cancel_check,
                 ai.summarize(
-                    episode.id, optimized, episode.summary_language, episode.title
+                    episode.id, optimized, episode.summary_language, title
                 ),
             )
             await self._stage(
@@ -165,7 +203,8 @@ class EpisodePipeline:
             generated = await self._stage(
                 job, 85, "Generating chapters", cancel_check,
                 ai.generate_chapters(
-                    episode.id, optimized, prepared.duration_sec, poster_path
+                    episode.id, optimized, prepared.duration_sec, poster_path,
+                    title=title, language=episode.summary_language,
                 ),
             )
             await self._stage(
@@ -236,6 +275,8 @@ class EpisodePipeline:
                     optimized,
                     episode.duration_sec or 0,
                     episode.poster_path,
+                    title=episode.title,
+                    language=episode.summary_language,
                 ),
             )
             await self._complete_regeneration(
@@ -441,6 +482,17 @@ class EpisodePipeline:
 
 def _warning(stage: str) -> ProcessingWarning:
     return ProcessingWarning(stage, "ai_stage_failed", f"{stage.title()} unavailable")
+
+
+def _is_fallback_title(episode) -> bool:
+    """Mirror the submit_url fallback so an extractor title only replaces it."""
+    if episode.source_type != "url" or not episode.source_url:
+        return False
+    try:
+        fallback = urlsplit(episode.source_url).hostname or "URL episode"
+    except ValueError:
+        return False
+    return episode.title == fallback
 
 
 def _validate_segments(segments):

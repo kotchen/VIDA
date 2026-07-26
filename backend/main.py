@@ -21,6 +21,7 @@ if __package__:
     from .logging_safety import disable_sensitive_dependency_logs, log_exception
     from .model_settings import validate_temperature
     from .v2.bootstrap import install_v2
+    from .v2.services.frontend import install_v2_frontend
 else:
     from video_processor import VideoProcessor
     from transcriber import Transcriber
@@ -29,6 +30,7 @@ else:
     from logging_safety import disable_sensitive_dependency_logs, log_exception
     from model_settings import validate_temperature
     from v2.bootstrap import install_v2
+    from v2.services.frontend import install_v2_frontend
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -49,7 +51,8 @@ app.add_middleware(
 # 获取项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent
 
-v2_runtime = install_v2(app, PROJECT_ROOT)
+transcriber = Transcriber()
+v2_runtime = install_v2(app, PROJECT_ROOT, transcriber=transcriber)
 
 # 挂载静态文件
 app.mount("/static", StaticFiles(directory=str(PROJECT_ROOT / "static")), name="static")
@@ -60,7 +63,6 @@ TEMP_DIR.mkdir(exist_ok=True)
 
 # 初始化处理器
 video_processor = VideoProcessor()
-transcriber = Transcriber()
 summarizer = Summarizer()
 translator = Translator()
 
@@ -1045,6 +1047,8 @@ async def get_active_tasks():
         "processing_urls": processing_count,
         "task_ids": list(active_tasks.keys())
     }
+
+install_v2_frontend(app, PROJECT_ROOT / "frontend" / "dist")
 
 if __name__ == "__main__":
     import uvicorn

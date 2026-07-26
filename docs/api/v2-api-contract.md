@@ -27,6 +27,39 @@
 }
 ```
 
+## 实时事件流
+
+```http
+GET /api/v2/events
+Accept: text/event-stream
+```
+
+成功响应使用 `Content-Type: text/event-stream`，并返回
+`Cache-Control: no-cache` 与 `X-Accel-Buffering: no`。连接建立后先发送
+`retry: 3000`；事件帧包含递增的 `id`、`event` 和单行 JSON `data`，空闲时每
+15 秒发送一次 heartbeat comment。
+
+公开事件类型和 data 如下：
+
+```ts
+type V2Event =
+  | { type: 'episode.updated'; data: {
+      episodeId: string; status: EpisodeStatus; progress: number
+    } }
+  | { type: 'episode.deleted'; data: { episodeId: string } }
+  | { type: 'job.updated'; data: {
+      jobId: string; episodeId: string; status: EpisodeStatus; progress: number
+    } }
+  | { type: 'profiles.invalidated'; data: Record<string, never> }
+  | { type: 'dashboard.invalidated'; data: Record<string, never> }
+```
+
+事件只用于提示客户端重新读取 REST 资源，不替代 REST 作为状态真值。事件
+broker 位于单个服务进程内，不持久化、无跨进程广播，也不支持 replay；
+`Last-Event-ID` 不保证补发。断线重连后客户端必须重新获取当前页面依赖的
+Episode、Job、Profile 或 Dashboard 数据。生产部署仍只允许单个
+FastAPI/Uvicorn 进程。
+
 ## 响应模型
 
 ```ts
@@ -43,6 +76,7 @@ interface Episode {
   id: string
   title: string
   sourceType: 'upload' | 'url'
+  sourceUrl: string | null
   mediaUrl: string | null
   posterUrl: string | null
   durationSec: number
@@ -90,6 +124,7 @@ interface Chapter {
   durationSec: number
   thumbnailUrl: string | null
   bookmarked: boolean
+  source: 'generated' | 'manual'
 }
 
 interface Job {
@@ -120,6 +155,7 @@ GET /api/v2/provider-profiles
 GET /api/v2/provider-profiles/{id}
 PATCH /api/v2/provider-profiles/{id}
 DELETE /api/v2/provider-profiles/{id}
+POST /api/v2/provider-profiles/models
 POST /api/v2/provider-profiles/{id}/test
 ```
 
@@ -157,6 +193,52 @@ PATCH 至少包含一个非 null 字段。省略 `apiKey` 会沿用旧凭据；�
 
 连接测试成功返回 `{ "ok": true, "latencyMs": 15, "modelAvailable": true, "message": "Connection successful" }`；上游原始响应、请求头、密钥和查询参数不会透传。
 
+### 模型发现
+
+Profile 创建或更新前可使用草稿凭据发现 OpenAI-compatible Provider 的模型：
+
+```http
+POST /api/v2/provider-profiles/models
+Content-Type: application/json
+```
+
+```json
+{
+  "profileId": "optional-existing-profile-id",
+  "baseUrl": "https://api.example/v1",
+  "apiKey": "optional-draft-api-key"
+}
+```
+
+`baseUrl` 必填且必须是 HTTP(S) URL。新建模式必须提供 `apiKey`；编辑模式提供
+`profileId` 后可省略 `apiKey`，服务端会使用该 Profile active revision 的已加密保存密钥。
+同时提供两者时，草稿 `apiKey` 优先。即使使用已保存密钥，`baseUrl` 仍取本次请求值，
+便于保存前测试新地址。未知字段、空 API Key，或同时缺少 `profileId`/`apiKey` 返回
+422 `validation_error`；不存在或已删除的 Profile 返回 404
+`provider_profile_not_found`。
+
+成功响应：
+
+```json
+{
+  "models": [
+    {
+      "id": "model-a",
+      "name": "Model A"
+    }
+  ],
+  "latencyMs": 24
+}
+```
+
+模型按 ID 去重并做大小写不敏感排序；空 ID、超过 512 字符的 ID/名称被忽略，
+名称缺失时使用 ID，最多返回 2000 个唯一模型。上游请求总超时为 15 秒。
+模型发现不保存 Base URL、API Key 或结果，也不创建 Profile revision。
+
+连接失败、鉴权失败、超时或上游响应异常统一返回 502
+`provider_models_fetch_failed`。响应和日志不会包含 API Key、完整 URL query、上游响应
+body、header 或原始 SDK 异常。
+
 ## Episode 提交、列表和读取
 
 ### URL 提交
@@ -168,12 +250,21 @@ Content-Type: application/json
 {
   "sourceUrl": "https://example.com/media.mp3",
   "providerProfileId": "uuid",
-  "summaryLanguage": "zh",
+  "summaryLanguage": "zh-Hans",
   "title": "optional"
 }
 ```
 
 JSON body 最大 16 KiB；未知字段被拒绝。`sourceUrl` 必须是最长 2048 字符的 HTTP(S) URL。下载器拒绝凭据 URL、私网/回环/链路本地目标、DNS rebinding、非标准 Web 端口和不安全重定向。
+
+`summaryLanguage` 同时决定摘要/章节输出语言和平台字幕抓取偏好。前端当前提供
+`zh-Hans`（简体中文）、`zh-Hant`（繁體中文）、`en`、`ja`、`es`；历史上存入的 `zh`
+仍然合法，字幕偏好按简体中文优先、繁体中文兜底处理。平台页面（YouTube、Bilibili
+等）在转录阶段会先按该语言偏好尝试下载已有字幕轨道（人工字幕优先于自动字幕，简体
+中文不会匹配繁体轨道，反之亦然）；命中时跳过 Whisper 直接落库，未命中或抓取失败时
+自动回退到本地 Whisper 转录。两条路径产出的转录段结构一致，后续摘要与章节流程不变。
+
+省略 `title` 时初始标题为 URL 的 hostname；平台页面（YouTube、Bilibili、TikTok、SoundCloud）在来源采集阶段通过 yt-dlp 元数据解析出真实标题后，会在转录开始前替换该回退标题并用于后续摘要生成。用户显式提供的 `title` 永远不会被覆盖。`sourceUrl` 会在创建和详情响应中原样返回，客户端可用它为支持的来源渲染网络播放器。
 
 ### 上传提交
 
@@ -204,6 +295,19 @@ GET /api/v2/dashboard
 
 转录按 `startSec` 排序；空 speaker 以 `Speaker 1` 返回。章节按 `startSec` 排序，`durationSec` 由下一章节起点或 Episode 总时长推导。
 
+### 删除
+
+```text
+DELETE /api/v2/episodes/{id}
+```
+
+只有 `completed`、`failed` 或 `canceled` Episode 可以删除，成功返回 204。
+删除会在数据库事务中级联移除关联 Job、转录、摘要和章节，并在事务提交后清理
+受控的 `data/v2/episodes/{episodeId}/` 文件树。`queued` 或 `processing`
+返回 409 `invalid_episode_state`，调用方应先取消；不存在的 Episode 返回 404
+`episode_not_found`。成功后事件流依次发布 `episode.deleted` 和
+`dashboard.invalidated`。
+
 ## Queue、Job、取消和重试
 
 ```text
@@ -229,7 +333,13 @@ POST /api/v2/episodes/{id}/summary/regenerate
 POST /api/v2/episodes/{id}/chapters/regenerate
 ```
 
-章节创建 body 为 `{ "startSec": 123, "title": "New Chapter" }`，返回 201。PATCH 至少提供 `startSec` 或 `title`；start 必须是有限非负数且不超过 Episode 时长。仅 manual 章节可修改或删除；DELETE 成功返回 204。
+章节创建 body 为 `{ "startSec": 123, "title": "New Chapter" }`，返回 201。
+PATCH 至少提供 `startSec`、`title` 或 `bookmarked` 之一，字段不能为 null；
+start 必须是有限非负数且不超过 Episode 时长。generated 和 manual 章节均可
+更新 `bookmarked`；只有 manual 章节可修改 `startSec`/`title` 或删除。
+包含内容字段和书签字段的 PATCH 在一个数据库事务中执行；若 generated 章节的
+内容修改返回 409 `generated_chapter_immutable`，书签也不会部分更新。DELETE
+成功返回 204。
 
 独立重新生成仅接受 completed Episode，返回 202 Job，并占用同一 FIFO/并发槽但不把 Episode 改回 processing。摘要在新值完整生成后原子替换，失败保留旧摘要；章节仅替换 generated 章节，manual 章节始终保留，失败时旧 generated 章节也保留。
 
@@ -276,7 +386,7 @@ GET /api/v2/episodes/{id}/export?format=txt|srt|md
 | 416 | `range_not_satisfiable` |
 | 422 | `provider_profile_inactive`, `validation_error` |
 | 500 | `internal_error` |
-| 502 | `provider_connection_failed` |
+| 502 | `provider_connection_failed`, `provider_models_fetch_failed` |
 
 未知异常仅在服务端记录 traceback；客户端只收到通用 `internal_error` 与 request ID。错误、日志和数据库中的上游消息必须先清洗。
 

@@ -6,11 +6,15 @@ from sqlite3 import Connection, Row
 
 from ..database import Database
 from ..domain import ChapterRecord, InvalidJobState, JobRecord, SummaryRecord
+from ..events import EventPublisher, ignore_event
 
 
 class JobRepository:
-    def __init__(self, database: Database):
+    def __init__(
+        self, database: Database, publish: EventPublisher = ignore_event
+    ):
         self._database = database
+        self._publish = publish
 
     def enqueue(self, job: JobRecord) -> JobRecord:
         _validate_fresh_job(job)
@@ -34,7 +38,9 @@ class JobRepository:
                 if changed != 1:
                     raise KeyError(job.episode_id)
             stored = _require_job(conn, job.id)
-        return _job_from_row(stored)
+        result = _job_from_row(stored)
+        self._publish_job(result)
+        return result
 
     def get(self, job_id: str) -> JobRecord | None:
         with self._database.connect() as conn:
@@ -72,7 +78,9 @@ class JobRepository:
                     "WHERE id=? AND current_job_id=?",
                     (now, row["episode_id"], row["id"]),
                 )
-            return _job_from_row(_require_job(conn, row["id"]))
+            result = _job_from_row(_require_job(conn, row["id"]))
+        self._publish_job(result)
+        return result
 
     def update_progress(
         self, job_id: str, progress: int, message: str, now: str
@@ -92,7 +100,9 @@ class JobRepository:
                     "WHERE id=? AND current_job_id=?",
                     (progress, message, now, row["episode_id"], job_id),
                 )
-            return _job_from_row(_require_job(conn, job_id))
+            result = _job_from_row(_require_job(conn, job_id))
+        self._publish_job(result)
+        return result
 
     def request_cancel(self, job_id: str, now: str) -> JobRecord:
         with self._database.transaction(immediate=True) as conn:
@@ -128,7 +138,9 @@ class JobRepository:
                     )
             else:
                 raise InvalidJobState(job_id, row["status"])
-            return _job_from_row(_require_job(conn, job_id))
+            result = _job_from_row(_require_job(conn, job_id))
+        self._publish_job(result)
+        return result
 
     def request_cancel_current(
         self, episode_id: str, expected_job_id: str, now: str
@@ -170,7 +182,9 @@ class JobRepository:
                     )
             else:
                 raise InvalidJobState(expected_job_id, row["status"])
-            return _job_from_row(_require_job(conn, expected_job_id))
+            result = _job_from_row(_require_job(conn, expected_job_id))
+        self._publish_job(result)
+        return result
 
     def complete(self, job_id: str, now: str) -> JobRecord:
         return self._finish(
@@ -204,21 +218,28 @@ class JobRepository:
             if row["type"] != "regenerate_summary" or summary.episode_id != row["episode_id"]:
                 raise InvalidJobState(job_id, row["status"])
             if row["cancel_requested_at"] is not None:
-                return _finish_in_connection(conn, row, "canceled", now, message="Canceled")
-            _require_regeneration_ownership(conn, row)
-            conn.execute("DELETE FROM summaries WHERE episode_id=?", (row["episode_id"],))
-            conn.execute(
-                "INSERT INTO summaries"
-                "(episode_id,content,read_time_min,key_points,confidence,generated_by) "
-                "VALUES(?,?,?,?,?,?)",
-                (
-                    summary.episode_id, summary.content, summary.read_time_min,
-                    summary.key_points, summary.confidence, summary.generated_by,
-                ),
-            )
-            return _finish_in_connection(
-                conn, row, "completed", now, progress=100, message="Completed"
-            )
+                result = _finish_in_connection(
+                    conn, row, "canceled", now, message="Canceled"
+                )
+            else:
+                _require_regeneration_ownership(conn, row)
+                conn.execute(
+                    "DELETE FROM summaries WHERE episode_id=?", (row["episode_id"],)
+                )
+                conn.execute(
+                    "INSERT INTO summaries"
+                    "(episode_id,content,read_time_min,key_points,confidence,generated_by) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (
+                        summary.episode_id, summary.content, summary.read_time_min,
+                        summary.key_points, summary.confidence, summary.generated_by,
+                    ),
+                )
+                result = _finish_in_connection(
+                    conn, row, "completed", now, progress=100, message="Completed"
+                )
+        self._publish_job(result)
+        return result
 
     def complete_regeneration_chapters(
         self, job_id: str, chapters, now: str
@@ -237,27 +258,34 @@ class JobRepository:
             ):
                 raise ValueError("invalid generated chapter replacement")
             if row["cancel_requested_at"] is not None:
-                return _finish_in_connection(conn, row, "canceled", now, message="Canceled")
-            _require_regeneration_ownership(conn, row)
-            conn.execute(
-                "DELETE FROM chapters WHERE episode_id=? AND source='generated'",
-                (row["episode_id"],),
-            )
-            for chapter in sorted(records, key=lambda value: (value.start_sec, value.id)):
-                conn.execute(
-                    "INSERT INTO chapters"
-                    "(id,episode_id,start_sec,title,duration_sec,thumbnail_path,"
-                    "thumbnail_content_type,bookmarked,source,created_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        chapter.id, chapter.episode_id, chapter.start_sec, chapter.title,
-                        chapter.duration_sec, chapter.thumbnail_path, None,
-                        int(chapter.bookmarked), chapter.source, now,
-                    ),
+                result = _finish_in_connection(
+                    conn, row, "canceled", now, message="Canceled"
                 )
-            return _finish_in_connection(
-                conn, row, "completed", now, progress=100, message="Completed"
-            )
+            else:
+                _require_regeneration_ownership(conn, row)
+                conn.execute(
+                    "DELETE FROM chapters WHERE episode_id=? AND source='generated'",
+                    (row["episode_id"],),
+                )
+                for chapter in sorted(
+                    records, key=lambda value: (value.start_sec, value.id)
+                ):
+                    conn.execute(
+                        "INSERT INTO chapters"
+                        "(id,episode_id,start_sec,title,duration_sec,thumbnail_path,"
+                        "thumbnail_content_type,bookmarked,source,created_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            chapter.id, chapter.episode_id, chapter.start_sec,
+                            chapter.title, chapter.duration_sec, chapter.thumbnail_path,
+                            None, int(chapter.bookmarked), chapter.source, now,
+                        ),
+                    )
+                result = _finish_in_connection(
+                    conn, row, "completed", now, progress=100, message="Completed"
+                )
+        self._publish_job(result)
+        return result
 
     def _finish(
         self,
@@ -286,10 +314,40 @@ class JobRepository:
             if row["cancel_requested_at"] is not None and status != "canceled":
                 status, progress, message = "canceled", None, "Canceled"
                 error_code = error_message = None
-            return _finish_in_connection(
+            result = _finish_in_connection(
                 conn, row, status, now, progress=progress, message=message,
                 error_code=error_code, error_message=error_message,
             )
+        self._publish_job(result)
+        return result
+
+    def _publish_job(self, job: JobRecord) -> None:
+        self._publish(
+            "job.updated",
+            {
+                "jobId": job.id,
+                "episodeId": job.episode_id,
+                "status": job.status,
+                "progress": job.progress,
+            },
+        )
+        if job.type == "process_episode":
+            with self._database.connect() as conn:
+                episode = conn.execute(
+                    "SELECT status,progress FROM episodes WHERE id=?",
+                    (job.episode_id,),
+                ).fetchone()
+            if episode is not None:
+                self._publish(
+                    "episode.updated",
+                    {
+                        "episodeId": job.episode_id,
+                        "status": episode["status"],
+                        "progress": episode["progress"],
+                    },
+                )
+        if job.status in {"completed", "failed", "canceled"}:
+            self._publish("dashboard.invalidated", {})
 
     def recover_interrupted(self, message: str) -> int:
         now = _utc_now()

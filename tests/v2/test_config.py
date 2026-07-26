@@ -17,6 +17,34 @@ class V2SettingsTests(unittest.TestCase):
         self.assertEqual(settings.upload_max_bytes, 5 * 1024**3)
         self.assertEqual(settings.data_dir, Path("D:/vida/data/v2"))
         self.assertEqual(settings.master_key, b"k" * 32)
+        self.assertIsNone(settings.platform_egress_proxy)
+
+    def test_platform_egress_proxy_is_optional_and_validated(self):
+        settings = V2Settings.from_environ(
+            {
+                "VIDA_PROFILE_MASTER_KEY": self.key,
+                "V2_PLATFORM_EGRESS_PROXY": "http://127.0.0.1:7897",
+            },
+            Path("."),
+        )
+        self.assertEqual(settings.platform_egress_proxy, "http://127.0.0.1:7897")
+
+        for invalid in (
+            "127.0.0.1:7897",
+            "socks5://127.0.0.1:7897",
+            "http://user:pass@127.0.0.1:7897",
+            "http://127.0.0.1:99999",
+            "http://127.0.0.1",
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "V2_PLATFORM_EGRESS_PROXY"):
+                    V2Settings.from_environ(
+                        {
+                            "VIDA_PROFILE_MASTER_KEY": self.key,
+                            "V2_PLATFORM_EGRESS_PROXY": invalid,
+                        },
+                        Path("."),
+                    )
 
     def test_rejects_invalid_worker_count_and_master_key(self):
         with self.assertRaisesRegex(ValueError, "V2_MAX_CONCURRENT_JOBS"):

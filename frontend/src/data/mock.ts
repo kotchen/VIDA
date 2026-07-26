@@ -7,20 +7,26 @@ import project1 from "../assets/project-1.png"
 import project2 from "../assets/project-2.png"
 import project3 from "../assets/project-3.png"
 import project4 from "../assets/project-4.png"
-import type { DashboardData } from "./types"
+import type { DashboardData } from "@/api/types"
 
-export const mockDashboard: DashboardData = {
+export const mockDashboard = {
   currentEpisode: {
     id: "ep-12",
     title: "AI Podcast Episode 12",
     sourceType: "upload",
-    mediaUrl: "",
+    sourceUrl: null,
+    mediaUrl: "/api/v2/episodes/ep-12/media",
     posterUrl: posterEpisode,
     durationSec: 3462,
     resolution: "1080p",
     status: "completed",
     language: "en",
     createdAt: "2024-05-16T09:00:00Z",
+    progress: 100,
+    message: "Completed",
+    queuePosition: null,
+    providerProfileId: "profile-primary",
+    warnings: [],
   },
   summary: {
     episodeId: "ep-12",
@@ -40,12 +46,12 @@ export const mockDashboard: DashboardData = {
     { id: "seg-6", startSec: 62, endSec: 75, speaker: "Sam", text: "Exactly. Bias, transparency, and responsible deployment are critical as these systems scale." },
   ],
   chapters: [
-    { id: "ch-1", startSec: 0, title: "Introduction & Welcome", durationSec: 105, thumbnailUrl: chapter1, bookmarked: false },
-    { id: "ch-2", startSec: 105, title: "AI in Healthcare", durationSec: 552, thumbnailUrl: chapter2, bookmarked: false },
-    { id: "ch-3", startSec: 717, title: "Creative AI Revolution", durationSec: 548, thumbnailUrl: chapter3, bookmarked: false },
-    { id: "ch-4", startSec: 1265, title: "Ethical Considerations", durationSec: 456, thumbnailUrl: chapter4, bookmarked: false },
-    { id: "ch-5", startSec: 1721, title: "The Future of AI", durationSec: 382, thumbnailUrl: chapter1, bookmarked: false },
-    { id: "ch-6", startSec: 2060, title: "Q&A and Closing Thoughts", durationSec: 1402, thumbnailUrl: chapter2, bookmarked: false },
+    { id: "ch-1", startSec: 0, title: "Introduction & Welcome", durationSec: 105, thumbnailUrl: chapter1, bookmarked: false, source: "generated" },
+    { id: "ch-2", startSec: 105, title: "AI in Healthcare", durationSec: 552, thumbnailUrl: chapter2, bookmarked: false, source: "generated" },
+    { id: "ch-3", startSec: 717, title: "Creative AI Revolution", durationSec: 548, thumbnailUrl: chapter3, bookmarked: false, source: "generated" },
+    { id: "ch-4", startSec: 1265, title: "Ethical Considerations", durationSec: 456, thumbnailUrl: chapter4, bookmarked: false, source: "generated" },
+    { id: "ch-5", startSec: 1721, title: "The Future of AI", durationSec: 382, thumbnailUrl: chapter1, bookmarked: false, source: "generated" },
+    { id: "ch-6", startSec: 2060, title: "Q&A and Closing Thoughts", durationSec: 1402, thumbnailUrl: chapter2, bookmarked: false, source: "generated" },
   ],
   recentProjects: [
     { id: "ep-12", title: "AI Podcast Episode 12", createdAt: "2024-05-16T09:00:00Z", durationSec: 3462, status: "completed", thumbnailUrl: project1 },
@@ -53,4 +59,4 @@ export const mockDashboard: DashboardData = {
     { id: "ep-10", title: "Customer Interview #7", createdAt: "2024-05-10T09:00:00Z", durationSec: 1351, status: "completed", thumbnailUrl: project3 },
     { id: "ep-9", title: "Design Sprint Debrief", createdAt: "2024-05-08T09:00:00Z", durationSec: 2469, status: "processing", thumbnailUrl: project4 },
   ],
-}
+} satisfies DashboardData

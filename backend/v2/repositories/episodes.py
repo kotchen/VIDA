@@ -8,6 +8,7 @@ from typing import Iterable
 from ..database import Database
 from ..domain import (
     EpisodeRecord,
+    InvalidJobState,
     ProcessingWarning,
     SummaryRecord,
     TranscriptSegmentRecord,
@@ -31,6 +32,17 @@ class EpisodeRepository:
         with self._database.connect() as conn:
             row = _select_episode(conn, episode_id)
         return None if row is None else _episode_from_row(row)
+
+    def delete_terminal(self, episode_id: str) -> EpisodeRecord:
+        with self._database.transaction(immediate=True) as conn:
+            row = _select_episode(conn, episode_id)
+            if row is None:
+                raise KeyError(episode_id)
+            if row["status"] not in {"completed", "failed", "canceled"}:
+                raise InvalidJobState(episode_id, row["status"])
+            episode = _episode_from_row(row)
+            conn.execute("DELETE FROM episodes WHERE id=?", (episode_id,))
+        return episode
 
     def committed_paths(self) -> list[str]:
         with self._database.connect() as conn:
@@ -85,6 +97,18 @@ class EpisodeRepository:
                     for row in sorted(records, key=lambda item: (item.ordinal, item.id))
                 ],
             )
+
+    def set_title(self, episode_id: str, title: str, updated_at: str) -> None:
+        """Replace an Episode title, e.g. with extractor metadata from ingest."""
+        if not 1 <= len(title.strip()) <= 200:
+            raise ValueError("episode title is invalid")
+        with self._database.transaction(immediate=True) as conn:
+            changed = conn.execute(
+                "UPDATE episodes SET title=?, updated_at=? WHERE id=?",
+                (title.strip(), updated_at, episode_id),
+            ).rowcount
+            if changed != 1:
+                raise KeyError(episode_id)
 
     def commit_core_output(
         self,

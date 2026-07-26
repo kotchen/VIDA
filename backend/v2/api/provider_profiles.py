@@ -6,6 +6,9 @@ from ..container import V2Runtime
 from ..errors import V2Error
 from ..schemas import (
     ProviderConnectionTestResponse,
+    ProviderModelDiscoveryRequest,
+    ProviderModelDiscoveryResponse,
+    ProviderModelOptionResponse,
     ProviderProfileCreate,
     ProviderProfileResponse,
     ProviderProfileUpdate,
@@ -36,6 +39,48 @@ def create_provider_profile_router(runtime: V2Runtime) -> APIRouter:
             ProviderProfileResponse.from_profile(profile)
             for profile in runtime.require_provider_profiles().list_profiles()
         ]
+
+    @router.post("/models", response_model=ProviderModelDiscoveryResponse)
+    async def discover_models(
+        payload: ProviderModelDiscoveryRequest,
+    ) -> ProviderModelDiscoveryResponse:
+        service = runtime.require_provider_profiles()
+        saved_key: str | None = None
+        if payload.profile_id is not None:
+            profile = service.get_profile(payload.profile_id)
+            if profile is None:
+                raise _not_found()
+            saved_key = service.get_revision_credentials(
+                profile.active_revision_id
+            ).api_key
+        api_key = (
+            payload.api_key.get_secret_value()
+            if payload.api_key is not None
+            else saved_key
+        )
+        if api_key is None:
+            raise RuntimeError("validated request has no provider credentials")
+        fetcher = runtime.provider_model_fetcher
+        if fetcher is None:
+            raise RuntimeError("provider model fetcher is not configured")
+        try:
+            models, latency_ms = await fetcher(str(payload.base_url), api_key)
+        except V2Error:
+            raise
+        except Exception:
+            raise V2Error(
+                "provider_models_fetch_failed",
+                "Unable to fetch provider models",
+                502,
+                {},
+            ) from None
+        return ProviderModelDiscoveryResponse(
+            models=[
+                ProviderModelOptionResponse(id=model_id, name=name)
+                for model_id, name in models
+            ],
+            latency_ms=latency_ms,
+        )
 
     @router.get("/{profile_id}", response_model=ProviderProfileResponse)
     def get_profile(profile_id: str) -> ProviderProfileResponse:

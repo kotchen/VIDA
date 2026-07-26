@@ -71,6 +71,22 @@ class V2ErrorContractTests(unittest.TestCase):
                 self.assertEqual(response.json(), {"detail": "Not Found"})
                 self.assertNotIn("X-Request-ID", response.headers)
 
+    def test_openapi_exposes_frontend_integration_contract(self):
+        schema = self.client.get("/openapi.json").json()
+        paths = schema["paths"]
+
+        self.assertIn("/api/v2/events", paths)
+        self.assertIn("delete", paths["/api/v2/episodes/{episode_id}"])
+        patch = paths[
+            "/api/v2/episodes/{episode_id}/chapters/{chapter_id}"
+        ]["patch"]
+        body = patch["requestBody"]["content"]["application/json"]["schema"]
+        reference = body["$ref"].removeprefix("#/").split("/")
+        chapter_update = schema
+        for part in reference:
+            chapter_update = chapter_update[part]
+        self.assertIn("bookmarked", chapter_update["properties"])
+
     def assert_v2_envelope(self, response, code):
         self.assertEqual(response.headers.get("content-type"), "application/json")
         self.assertEqual(set(response.json()), {"error"})

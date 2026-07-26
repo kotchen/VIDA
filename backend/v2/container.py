@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from .config import V2Settings
 from .database import Database
 from .errors import install_v2_error_contract
+from .events import V2EventBroker
 from .jobs.models import JobExecutor
 from .jobs.scheduler import Scheduler
 from .repositories.episodes import EpisodeRepository
@@ -29,10 +30,17 @@ logger = logging.getLogger(__name__)
 
 ProviderTestResult = tuple[bool, int, bool, str]
 ProviderTester = Callable[[ProviderRevisionCredentials], Awaitable[ProviderTestResult]]
+ProviderModelOption = tuple[str, str]
+ProviderModelFetchResult = tuple[list[ProviderModelOption], int]
+ProviderModelFetcher = Callable[
+    [str, str],
+    Awaitable[ProviderModelFetchResult],
+]
 
 
 @dataclass
 class V2Runtime:
+    events: V2EventBroker = field(default_factory=V2EventBroker)
     settings: V2Settings | None = None
     database: Database | None = None
     job_repository: JobRepository | None = None
@@ -45,6 +53,10 @@ class V2Runtime:
     episode_service: EpisodeService | None = None
     media_service: MediaService | None = None
     provider_tester: ProviderTester | None = None
+    provider_model_fetcher: ProviderModelFetcher | None = None
+    _readiness: Callable[[], Awaitable[None]] | None = field(
+        default=None, repr=False
+    )
     _initializer: Callable[[], "V2Runtime"] | None = field(default=None, repr=False)
 
     def initialize(self) -> None:
@@ -53,6 +65,7 @@ class V2Runtime:
         if self._initializer is None:
             raise RuntimeError("v2 runtime has no initializer")
         initialized = self._initializer()
+        self.events = initialized.events
         self.settings = initialized.settings
         self.database = initialized.database
         self.job_repository = initialized.job_repository
@@ -66,6 +79,10 @@ class V2Runtime:
         self.media_service = initialized.media_service
         if self.provider_tester is None:
             self.provider_tester = initialized.provider_tester
+        if self.provider_model_fetcher is None:
+            self.provider_model_fetcher = initialized.provider_model_fetcher
+        if self._readiness is None:
+            self._readiness = initialized._readiness
 
     def require_provider_profiles(self) -> ProviderProfileService:
         if self.provider_profile_service is None:
@@ -79,6 +96,8 @@ class V2Runtime:
 
     async def start(self) -> None:
         self.initialize()
+        if self._readiness is not None:
+            await self._readiness()
         self.log_startup_settings()
         if self.scheduler is None:
             raise RuntimeError("v2 runtime has no scheduler")

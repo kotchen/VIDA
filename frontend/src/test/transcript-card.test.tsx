@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react"
+import { fireEvent, render, screen } from "@testing-library/react"
 import { TranscriptCard } from "../components/dashboard/TranscriptCard"
 import { mockDashboard } from "../data/mock"
 
@@ -18,5 +18,16 @@ describe("TranscriptCard", () => {
     render(<TranscriptCard segments={mockDashboard.transcript} />)
     const first = screen.getByText(/Welcome back to the AI Podcast!/).closest("li")
     expect(first?.className).toContain("bg-copper-500/15")
+  })
+
+  it("calls onSeek with the segment start when its timestamp is clicked", () => {
+    const onSeek = vi.fn()
+    render(<TranscriptCard segments={mockDashboard.transcript} onSeek={onSeek} />)
+    const segment = mockDashboard.transcript[1]
+    fireEvent.click(
+      screen.getByRole("button", { name: `Seek to 00:00:09` }),
+    )
+    expect(onSeek).toHaveBeenCalledTimes(1)
+    expect(onSeek).toHaveBeenCalledWith(segment?.startSec)
   })
 })

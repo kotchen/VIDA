@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import base64
 import tempfile
 import unittest
@@ -12,7 +11,6 @@ from backend.v2.jobs.models import JobCanceled
 from backend.v2.jobs.source_ingest import (
     AsyncioProcessRunner,
     DownloadError,
-    ProcessResult,
     SecureDownloader,
     SourceIngestError,
     SourceIngestor,
@@ -170,33 +168,14 @@ class SourceBoundarySecurityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class YtDlpAcquisitionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_supported_pages_resolve_once_then_use_secure_downloader(self):
-        class Runner:
-            def __init__(self):
-                self.commands = []
-
-            async def run(self, command, cancel_check, timeout_sec=None, env=None):
-                self.commands.append(tuple(command))
-                self.env = env
-                return ProcessResult(0, json.dumps({"url": "https://cdn.example/media.mp4"}), "")
-
+    async def test_split_format_page_downloads_one_audio_file_with_safe_options(self):
+        policy_calls = []
         class Policy:
             async def validate_url(self, url, cancel_check):
-                return None
-
-        class Media:
-            def __init__(self):
-                self.calls = []
-
-            async def download(self, url, directory, cancel_check, progress=None):
-                self.calls.append(url)
-                target = Path(directory) / "media.mp4"
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(b"x")
-                return target
+                policy_calls.append(url)
 
         class Proxy:
-            proxy_url = "http://secret@127.0.0.1:32123"
+            proxy_url = "http://user:password@127.0.0.1:32123"
 
             def __init__(self):
                 self.entered = self.exited = False
@@ -208,46 +187,403 @@ class YtDlpAcquisitionTests(unittest.IsolatedAsyncioTestCase):
             async def __aexit__(self, *args):
                 self.exited = True
 
+        directory = Path(tempfile.mkdtemp())
+        captured = {}
+        progress = []
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                self.params = options
+                captured.update(options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def extract_info(self, url, download):
+                self.params["progress_hooks"][0]({
+                    "status": "downloading",
+                    "downloaded_bytes": 4,
+                    "total_bytes": 8,
+                })
+                (directory / "media.m4a").write_bytes(b"audio")
+                return {
+                    "requested_formats": [
+                        {"vcodec": "h264", "acodec": "none"},
+                        {"vcodec": "none", "acodec": "aac"},
+                    ],
+                    "http_headers": {"Referer": url},
+                }
+
+        async def inline(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        proxy = Proxy()
+        path = await YtDlpDownloader(
+            Policy(),
+            max_bytes=123,
+            proxy_factory=lambda cancel_check: proxy,
+            youtube_dl_factory=FakeYoutubeDL,
+            thread_runner=inline,
+        ).download(
+            "https://www.bilibili.com/video/x",
+            directory,
+            lambda: False,
+            progress.append,
+        )
+
+        self.assertEqual(policy_calls, ["https://www.bilibili.com/video/x"])
+        self.assertEqual(captured["format"], "bestaudio/best")
+        self.assertEqual(captured["proxy"], proxy.proxy_url)
+        self.assertEqual(
+            captured["outtmpl"], str(directory / "media.%(ext)s")
+        )
+        self.assertTrue(captured["noplaylist"])
+        self.assertTrue(captured["noprogress"])
+        self.assertFalse(captured["cachedir"])
+        self.assertEqual(captured["max_filesize"], 123)
+        self.assertNotIn("postprocessors", captured)
+        self.assertEqual(progress, [4])
+        self.assertEqual(path, (directory / "media.m4a").resolve())
+        self.assertTrue(proxy.entered and proxy.exited)
+
+    async def test_egress_proxy_bypasses_ssrf_tunnel(self):
+        directory = Path(tempfile.mkdtemp())
+        captured = {}
+
+        class Policy:
+            async def validate_url(self, url, cancel_check):
+                return None
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                captured.update(options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def extract_info(self, url, download):
+                (directory / "media.m4a").write_bytes(b"audio")
+                return {}
+
+        def forbidden_factory(cancel_check):
+            raise AssertionError("SSRF tunnel must not start in egress mode")
+
+        async def inline(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        path = await YtDlpDownloader(
+            Policy(),
+            proxy_factory=forbidden_factory,
+            youtube_dl_factory=FakeYoutubeDL,
+            thread_runner=inline,
+            egress_proxy="http://127.0.0.1:7897",
+        ).download("https://www.youtube.com/watch?v=x", directory, lambda: False)
+
+        self.assertEqual(captured["proxy"], "http://127.0.0.1:7897")
+        self.assertEqual(path, (directory / "media.m4a").resolve())
+
+    async def test_supported_platforms_and_unknown_pages_are_separated(self):
+        constructed = []
+
+        class Policy:
+            async def validate_url(self, url, cancel_check):
+                return None
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                constructed.append(options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def extract_info(self, url, download):
+                (directory / "media.webm").write_bytes(b"audio")
+
+        class Proxy:
+            proxy_url = "http://user:password@127.0.0.1:32123"
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+        async def inline(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
         for url in (
             "https://www.youtube.com/watch?v=x", "https://www.bilibili.com/video/x",
             "https://www.tiktok.com/@a/video/1", "https://soundcloud.com/a/b",
         ):
             with self.subTest(url=url):
-                runner, media, proxy = Runner(), Media(), Proxy()
+                directory = Path(tempfile.mkdtemp())
                 path = await YtDlpDownloader(
-                    runner, media, Policy(), max_bytes=123,
-                    proxy_factory=lambda cancel_check: proxy,
+                    Policy(),
+                    proxy_factory=lambda cancel_check: Proxy(),
+                    youtube_dl_factory=FakeYoutubeDL,
+                    thread_runner=inline,
                 ).download(
-                    url, Path(tempfile.mkdtemp()), lambda: False
+                    url, directory, lambda: False
                 )
-                command = " ".join(runner.commands[0])
-                self.assertIn("--no-playlist", command)
-                self.assertIn("--no-config", command)
-                self.assertIn("--max-filesize 123", command)
-                self.assertIn("--skip-download", command)
-                self.assertIn("--no-plugin-dirs", command)
-                self.assertIn("--proxy http://secret@127.0.0.1:32123", command)
-                self.assertEqual(media.calls, ["https://cdn.example/media.mp4"])
-                self.assertTrue(proxy.entered and proxy.exited)
-                self.assertFalse(any(key.lower() in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"} for key in runner.env))
-                self.assertEqual(runner.env.get("YTDLP_NO_PLUGINS"), "1")
-                self.assertTrue(path.exists())
+                self.assertEqual(path, (directory / "media.webm").resolve())
 
-    async def test_unsupported_page_and_extractor_failure_are_sanitized(self):
-        class Runner:
-            async def run(self, command, cancel_check, timeout_sec=None, env=None):
-                return ProcessResult(1, "", "secret")
+        downloader = YtDlpDownloader(
+            Policy(),
+            proxy_factory=lambda cancel_check: Proxy(),
+            youtube_dl_factory=FakeYoutubeDL,
+            thread_runner=inline,
+        )
+        with self.assertRaisesRegex(DownloadError, "Unsupported"):
+            await downloader.download(
+                "https://unknown.example/page",
+                Path(tempfile.mkdtemp()),
+                lambda: False,
+            )
+        self.assertEqual(len(constructed), 4)
+
+    async def test_download_with_metadata_returns_sanitized_extractor_title(self):
+        directory = Path(tempfile.mkdtemp())
 
         class Policy:
             async def validate_url(self, url, cancel_check):
+                return None
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                self.params = options
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def extract_info(self, url, download):
+                (directory / "media.m4a").write_bytes(b"audio")
+                return {"title": "  Line One\nLine\x00 Two  "}
+
+        class Proxy:
+            proxy_url = "http://user:password@127.0.0.1:32123"
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+        async def inline(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        fetched = await YtDlpDownloader(
+            Policy(),
+            proxy_factory=lambda cancel_check: Proxy(),
+            youtube_dl_factory=FakeYoutubeDL,
+            thread_runner=inline,
+        ).download_with_metadata(
+            "https://www.bilibili.com/video/x", directory, lambda: False
+        )
+
+        self.assertEqual(fetched.path, (directory / "media.m4a").resolve())
+        self.assertEqual(fetched.title, "Line One Line Two")
+
+    async def test_download_with_metadata_tolerates_missing_or_overlong_title(self):
+        class Policy:
+            async def validate_url(self, url, cancel_check):
+                return None
+
+        class Proxy:
+            proxy_url = "http://user:password@127.0.0.1:32123"
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+        async def inline(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        for info, expected in (
+            ({}, None),
+            ({"title": 42}, None),
+            ({"title": "   "}, None),
+            ({"title": "x" * 300}, "x" * 200),
+        ):
+            with self.subTest(info=info):
+                directory = Path(tempfile.mkdtemp())
+
+                class FakeYoutubeDL:
+                    def __init__(self, options):
+                        self.params = options
+
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *args):
+                        return None
+
+                    def extract_info(self, url, download):
+                        (directory / "media.m4a").write_bytes(b"audio")
+                        return info
+
+                fetched = await YtDlpDownloader(
+                    Policy(),
+                    proxy_factory=lambda cancel_check: Proxy(),
+                    youtube_dl_factory=FakeYoutubeDL,
+                    thread_runner=inline,
+                ).download_with_metadata(
+                    "https://www.bilibili.com/video/x", directory, lambda: False
+                )
+                self.assertEqual(fetched.title, expected)
+
+    async def test_cancel_from_progress_hook_propagates_and_cleans_output(self):
+        directory = Path(tempfile.mkdtemp())
+
+        class Policy:
+            async def validate_url(self, url, cancel_check):
+                return None
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                self.params = options
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def extract_info(self, url, download):
+                (directory / "media.m4a.part").write_bytes(b"partial")
+                self.params["progress_hooks"][0]({
+                    "status": "downloading",
+                    "downloaded_bytes": 7,
+                })
+
+        class Proxy:
+            proxy_url = "http://user:password@127.0.0.1:32123"
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+        async def inline(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        with self.assertRaises(JobCanceled):
+            await YtDlpDownloader(
+                Policy(),
+                proxy_factory=lambda cancel_check: Proxy(),
+                youtube_dl_factory=FakeYoutubeDL,
+                thread_runner=inline,
+            ).download(
+                "https://youtube.com/watch?v=x",
+                directory,
+                lambda: True,
+            )
+        self.assertEqual(list(directory.iterdir()), [])
+
+    async def test_invalid_outputs_and_extractor_failures_are_sanitized(self):
+        class Policy:
+            async def validate_url(self, url, cancel_check):
+                return None
+
+        class Proxy:
+            proxy_url = "http://user:password@127.0.0.1:32123"
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+        async def inline(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        async def run_case(writer):
+            directory = Path(tempfile.mkdtemp())
+
+            class FakeYoutubeDL:
+                def __init__(self, options):
+                    pass
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return None
+
+                def extract_info(self, url, download):
+                    writer(directory)
+
+            with self.assertRaises(DownloadError):
+                await YtDlpDownloader(
+                    Policy(),
+                    proxy_factory=lambda cancel_check: Proxy(),
+                    youtube_dl_factory=FakeYoutubeDL,
+                    thread_runner=inline,
+                ).download(
+                    "https://youtube.com/watch?v=x",
+                    directory,
+                    lambda: False,
+                )
+            self.assertEqual(list(directory.iterdir()), [])
+
+        await run_case(lambda directory: (
+            (directory / "media.m4a").write_bytes(b"a"),
+            (directory / "extra.mp3").write_bytes(b"b"),
+        ))
+        await run_case(
+            lambda directory: (directory / "media.m4a.part").write_bytes(b"a")
+        )
+        await run_case(
+            lambda directory: (directory / "media.txt").write_text("not media")
+        )
+
+        directory = Path(tempfile.mkdtemp())
+
+        class FailingYoutubeDL:
+            def __init__(self, options):
                 pass
 
-        downloader = YtDlpDownloader(Runner(), FakeDownloader(), Policy())
-        with self.assertRaises(DownloadError):
-            await downloader.download("https://unknown.example/page", Path(tempfile.mkdtemp()), lambda: False)
-        with self.assertRaisesRegex(DownloadError, "resolve") as raised:
-            await downloader.download("https://youtube.com/watch?v=x", Path(tempfile.mkdtemp()), lambda: False)
-        self.assertNotIn("secret", str(raised.exception))
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def extract_info(self, url, download):
+                raise RuntimeError(
+                    "https://cdn.example/media?signature=secret "
+                    + Proxy.proxy_url
+                )
+
+        with self.assertRaisesRegex(
+            DownloadError, "Unable to download"
+        ) as raised:
+            await YtDlpDownloader(
+                Policy(),
+                proxy_factory=lambda cancel_check: Proxy(),
+                youtube_dl_factory=FailingYoutubeDL,
+                thread_runner=inline,
+            ).download(
+                "https://youtube.com/watch?v=x",
+                directory,
+                lambda: False,
+            )
+        self.assertNotIn("signature", str(raised.exception))
+        self.assertNotIn("password", str(raised.exception))
 
 
 class ControlledProxyTests(unittest.IsolatedAsyncioTestCase):
@@ -361,8 +697,11 @@ class ControlledProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(writer.joined)
 
     def test_connect_authority_and_headers_are_strict(self):
-        valid_token = "token"
-        auth = base64.b64encode(b"token:").decode()
+        username = "user-token"
+        password = "password-token"
+        auth = base64.b64encode(
+            f"{username}:{password}".encode()
+        ).decode()
         for authority, expected in (
             ("example.com:443", ("example.com", 443)),
             ("[2606:4700:4700::1111]:443", ("2606:4700:4700::1111", 443)),
@@ -371,7 +710,12 @@ class ControlledProxyTests(unittest.IsolatedAsyncioTestCase):
                 f"CONNECT {authority} HTTP/1.1\r\n"
                 f"Proxy-Authorization: Basic {auth}\r\nHost: {authority}\r\n\r\n"
             ).encode()
-            self.assertEqual(source_ingest._parse_connect_request(request, valid_token), expected)
+            self.assertEqual(
+                source_ingest._parse_connect_request(
+                    request, username, password
+                ),
+                expected,
+            )
         malformed = (
             "example.com", "example.com:8443", "example.com:443/path",
             "example.com:443?x", "user@example.com:443", "2001:db8::1:443",
@@ -382,7 +726,8 @@ class ControlledProxyTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(authority=authority), self.assertRaises(DownloadError):
                 source_ingest._parse_connect_request(
                     f"CONNECT {authority} HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\n".encode(),
-                    valid_token,
+                    username,
+                    password,
                 )
         malformed_requests = (
             f"GET example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\n",
@@ -394,7 +739,24 @@ class ControlledProxyTests(unittest.IsolatedAsyncioTestCase):
         )
         for request in malformed_requests:
             with self.subTest(request=request), self.assertRaises(DownloadError):
-                source_ingest._parse_connect_request(request.encode(), valid_token)
+                source_ingest._parse_connect_request(
+                    request.encode(), username, password
+                )
+
+        wrong_auth = base64.b64encode(b"user-token:wrong").decode()
+        with self.assertRaisesRegex(
+            DownloadError, "authentication"
+        ) as raised:
+            source_ingest._parse_connect_request(
+                (
+                    "CONNECT example.com:443 HTTP/1.1\r\n"
+                    f"Proxy-Authorization: Basic {wrong_auth}\r\n\r\n"
+                ).encode(),
+                username,
+                password,
+            )
+        self.assertNotIn(username, str(raised.exception))
+        self.assertNotIn(password, str(raised.exception))
 
     async def test_real_loopback_rejects_auth_and_shutdown_joins_active_handler(self):
         class UpstreamWriter:
@@ -427,6 +789,8 @@ class ControlledProxyTests(unittest.IsolatedAsyncioTestCase):
         )
         await proxy.__aenter__()
         parsed = __import__("urllib.parse", fromlist=["urlsplit"]).urlsplit(proxy.proxy_url)
+        self.assertTrue(parsed.username)
+        self.assertTrue(parsed.password)
         reader, writer = await asyncio.open_connection("127.0.0.1", parsed.port)
         writer.write(b"CONNECT example.com:443 HTTP/1.1\r\n\r\n")
         await writer.drain()
@@ -436,8 +800,23 @@ class ControlledProxyTests(unittest.IsolatedAsyncioTestCase):
         writer.close()
         await asyncio.wait_for(writer.wait_closed(), 1)
 
-        token = parsed.username
-        auth = base64.b64encode(f"{token}:".encode()).decode()
+        wrong_auth = base64.b64encode(
+            f"{parsed.username}:wrong".encode()
+        ).decode()
+        reader, writer = await asyncio.open_connection("127.0.0.1", parsed.port)
+        writer.write(
+            f"CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {wrong_auth}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        self.assertIn(
+            b"403", await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 1)
+        )
+        writer.close()
+        await asyncio.wait_for(writer.wait_closed(), 1)
+
+        auth = base64.b64encode(
+            f"{parsed.username}:{parsed.password}".encode()
+        ).decode()
         reader, writer = await asyncio.open_connection("127.0.0.1", parsed.port)
         writer.write(
             f"CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\n".encode()

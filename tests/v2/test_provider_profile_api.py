@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.v2.bootstrap import build_test_runtime
+from backend.v2.bootstrap import build_test_runtime, fetch_provider_models
 from backend.v2.bootstrap import test_provider_connection as run_provider_connection_test
 from backend.v2.errors import V2Error
 from backend.v2.services.provider_profiles import ProviderRevisionCredentials
@@ -19,6 +19,12 @@ class ProviderProfileApiTests(unittest.TestCase):
         self.runtime = build_test_runtime(Path(self.temp.name), b"m" * 32)
         self.runtime.provider_tester = AsyncMock(
             return_value=(True, 15, True, "Connection successful")
+        )
+        self.runtime.provider_model_fetcher = AsyncMock(
+            return_value=(
+                [("model-a", "Model A"), ("model-b", "Model B")],
+                24,
+            )
         )
         app = FastAPI()
         self.runtime.install(app)
@@ -182,6 +188,127 @@ class ProviderProfileApiTests(unittest.TestCase):
         self.assertEqual(credentials.api_key, "new-secret")
         self.assertEqual(credentials.model_id, "model-b")
 
+    def test_model_discovery_uses_draft_credentials(self):
+        response = self.client.post(
+            "/api/v2/provider-profiles/models",
+            json={
+                "baseUrl": "https://draft.example/v1",
+                "apiKey": "draft-secret",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.json(),
+            {
+                "models": [
+                    {"id": "model-a", "name": "Model A"},
+                    {"id": "model-b", "name": "Model B"},
+                ],
+                "latencyMs": 24,
+            },
+        )
+        self.runtime.provider_model_fetcher.assert_awaited_once_with(
+            "https://draft.example/v1", "draft-secret"
+        )
+
+    def test_model_discovery_reuses_active_key_with_draft_url(self):
+        created = self.create_profile()
+
+        response = self.client.post(
+            "/api/v2/provider-profiles/models",
+            json={
+                "profileId": created["id"],
+                "baseUrl": "https://changed.example/v1",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.runtime.provider_model_fetcher.assert_awaited_once_with(
+            "https://changed.example/v1", "secret-key"
+        )
+
+    def test_model_discovery_draft_key_overrides_saved_key(self):
+        created = self.create_profile()
+
+        response = self.client.post(
+            "/api/v2/provider-profiles/models",
+            json={
+                "profileId": created["id"],
+                "baseUrl": "https://changed.example/v1",
+                "apiKey": "override-secret",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.runtime.provider_model_fetcher.assert_awaited_once_with(
+            "https://changed.example/v1", "override-secret"
+        )
+
+    def test_model_discovery_validates_credentials_and_unknown_fields(self):
+        cases = (
+            {"baseUrl": "https://api.example/v1"},
+            {
+                "baseUrl": "https://api.example/v1",
+                "apiKey": "secret-key",
+                "unexpected": True,
+            },
+        )
+        for payload in cases:
+            with self.subTest(payload=payload):
+                response = self.client.post(
+                    "/api/v2/provider-profiles/models",
+                    json=payload,
+                )
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertEqual(
+                    response.json()["error"]["code"],
+                    "validation_error",
+                )
+
+    def test_model_discovery_rejects_missing_and_deleted_profiles(self):
+        created = self.create_profile()
+        self.assertEqual(
+            self.client.delete(
+                f"/api/v2/provider-profiles/{created['id']}"
+            ).status_code,
+            204,
+        )
+        for profile_id in ("missing", created["id"]):
+            with self.subTest(profile_id=profile_id):
+                response = self.client.post(
+                    "/api/v2/provider-profiles/models",
+                    json={
+                        "profileId": profile_id,
+                        "baseUrl": "https://api.example/v1",
+                    },
+                )
+                self.assertEqual(response.status_code, 404, response.text)
+                self.assert_profile_not_found(response)
+
+    def test_model_discovery_sanitizes_fetcher_failure(self):
+        self.runtime.provider_model_fetcher.side_effect = RuntimeError(
+            "upstream response containing draft-secret"
+        )
+
+        response = self.client.post(
+            "/api/v2/provider-profiles/models",
+            json={
+                "baseUrl": "https://draft.example/v1?token=url-secret",
+                "apiKey": "draft-secret",
+            },
+        )
+
+        self.assertEqual(response.status_code, 502, response.text)
+        error = response.json()["error"]
+        self.assertEqual(error["code"], "provider_models_fetch_failed")
+        self.assertEqual(error["message"], "Unable to fetch provider models")
+        self.assertEqual(error["details"], {})
+        self.assertEqual(response.headers["X-Request-ID"], error["requestId"])
+        self.assertNotIn("draft-secret", response.text)
+        self.assertNotIn("url-secret", response.text)
+        self.assertNotIn("upstream response", response.text)
+
     def assert_profile_not_found(self, response):
         error = response.json()["error"]
         self.assertEqual(
@@ -282,6 +409,79 @@ class ProviderConnectionTesterTests(unittest.IsolatedAsyncioTestCase):
         client.models = SimpleNamespace(list=Mock(return_value=response))
         client.close = Mock()
         return client
+
+
+class ProviderModelFetcherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_normalizes_models_and_closes_client(self):
+        client = ProviderConnectionTesterTests.fake_client(
+            SimpleNamespace(
+                data=[
+                    SimpleNamespace(id="z-model", name="Zed"),
+                    SimpleNamespace(id="A-model", name=""),
+                    SimpleNamespace(id="z-model", name="Duplicate"),
+                    SimpleNamespace(id="  ", name="Blank"),
+                    SimpleNamespace(id="x" * 513, name="Too long"),
+                ]
+            )
+        )
+        calls = []
+
+        async def run_in_thread(function):
+            calls.append(function)
+            return function()
+
+        with (
+            patch("backend.v2.bootstrap.OpenAI", return_value=client) as openai_cls,
+            patch("backend.v2.bootstrap.asyncio.to_thread", side_effect=run_in_thread),
+            patch(
+                "backend.v2.bootstrap.time",
+                new=SimpleNamespace(monotonic=Mock(side_effect=[10.0, 10.125])),
+            ),
+        ):
+            result = await fetch_provider_models(
+                "https://api.example/v1", "secret-key"
+            )
+
+        self.assertEqual(
+            result,
+            ([("A-model", "A-model"), ("z-model", "Zed")], 125),
+        )
+        openai_cls.assert_called_once_with(
+            api_key="secret-key",
+            base_url="https://api.example/v1",
+            timeout=15.0,
+        )
+        self.assertEqual(calls, [client.models.list, client.close])
+
+    async def test_caps_normalized_models_at_two_thousand(self):
+        client = ProviderConnectionTesterTests.fake_client(
+            SimpleNamespace(
+                data=[
+                    SimpleNamespace(id=f"model-{index:04d}", name=f"Model {index}")
+                    for index in range(2001)
+                ]
+            )
+        )
+        with patch("backend.v2.bootstrap.OpenAI", return_value=client):
+            models, _ = await fetch_provider_models(
+                "https://api.example/v1", "secret-key"
+            )
+
+        self.assertEqual(len(models), 2000)
+        self.assertEqual(models[0], ("model-0000", "Model 0"))
+        self.assertEqual(models[-1], ("model-1999", "Model 1999"))
+
+    async def test_list_failure_still_closes_client(self):
+        client = ProviderConnectionTesterTests.fake_client()
+        client.models.list.side_effect = RuntimeError("provider unavailable")
+
+        with patch("backend.v2.bootstrap.OpenAI", return_value=client):
+            with self.assertRaises(RuntimeError):
+                await fetch_provider_models(
+                    "https://api.example/v1", "secret-key"
+                )
+
+        client.close.assert_called_once_with()
 
 
 if __name__ == "__main__":

@@ -7,6 +7,13 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
+if __package__:
+    from .whisper_environment import configure_huggingface_environment
+else:
+    from whisper_environment import configure_huggingface_environment
+
+
+configure_huggingface_environment()
 from faster_whisper import WhisperModel
 
 
@@ -30,8 +37,18 @@ class StructuredTranscription:
 class Transcriber:
     """Transcribe audio with Faster-Whisper."""
 
-    def __init__(self, model_size: str = "base"):
-        self.model_size = model_size
+    def __init__(
+        self,
+        model_size: str | None = None,
+        model_load_timeout_sec: float | None = None,
+    ):
+        self.model_size = model_size or os.getenv("WHISPER_MODEL_SIZE", "base")
+        raw_timeout = (
+            model_load_timeout_sec
+            if model_load_timeout_sec is not None
+            else os.getenv("WHISPER_MODEL_LOAD_TIMEOUT_SEC", "300")
+        )
+        self.model_load_timeout_sec = _positive_timeout(raw_timeout)
         self.model = None
         self._model_lock = asyncio.Lock()
         self.last_detected_language = None
@@ -50,10 +67,23 @@ class Transcriber:
                     device="cpu",
                     compute_type="int8",
                 )
-            except Exception as exc:
+            except Exception:
                 logger.error("模型加载失败")
-                raise Exception(f"模型加载失败: {exc}") from None
+                raise RuntimeError("Whisper model initialization failed") from None
             logger.info("模型加载完成")
+
+    async def preload(self) -> None:
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(self._load_model()),
+                timeout=self.model_load_timeout_sec,
+            )
+        except TimeoutError:
+            logger.error("Whisper model initialization timed out")
+            raise RuntimeError("Whisper model initialization timed out") from None
+        except Exception:
+            logger.error("Whisper model initialization failed")
+            raise RuntimeError("Whisper model initialization failed") from None
 
     async def transcribe(self, audio_path: str, language: Optional[str] = None) -> str:
         """Return the exact legacy Markdown transcript format."""
@@ -103,21 +133,24 @@ class Transcriber:
         logger.info("Starting audio transcription")
 
         def materialize() -> StructuredTranscription:
+            transcribe_kwargs = {
+                "language": language,
+                "beam_size": 5,
+                "best_of": 5,
+                "temperature": [0.0, 0.2, 0.4],
+                "no_speech_threshold": 0.7,
+                "compression_ratio_threshold": 2.3,
+                "log_prob_threshold": -1.0,
+                "condition_on_previous_text": False,
+            }
             segments, info = self.model.transcribe(
                 audio_path,
-                language=language,
-                beam_size=5,
-                best_of=5,
-                temperature=[0.0, 0.2, 0.4],
                 vad_filter=True,
                 vad_parameters={
                     "min_silence_duration_ms": 900,
                     "speech_pad_ms": 300,
                 },
-                no_speech_threshold=0.7,
-                compression_ratio_threshold=2.3,
-                log_prob_threshold=-1.0,
-                condition_on_previous_text=False,
+                **transcribe_kwargs,
             )
             rows = tuple(
                 TranscriptSegment(
@@ -127,6 +160,23 @@ class Transcriber:
                 )
                 for segment in segments
             )
+            if not rows:
+                # Silero VAD can swallow an entire music-heavy or quiet track;
+                # never let it turn a playable audio into an empty transcript.
+                logger.warning(
+                    "VAD produced no segments; retrying without VAD filter"
+                )
+                segments, info = self.model.transcribe(
+                    audio_path, vad_filter=False, **transcribe_kwargs
+                )
+                rows = tuple(
+                    TranscriptSegment(
+                        _strict_timestamp(segment.start),
+                        _strict_timestamp(segment.end),
+                        segment.text.strip(),
+                    )
+                    for segment in segments
+                )
             return StructuredTranscription(
                 str(info.language), float(info.language_probability), rows
             )
@@ -168,3 +218,17 @@ def _strict_timestamp(value) -> float:
     if type(value) not in {int, float} or not math.isfinite(float(value)):
         raise ValueError("invalid transcript timestamp")
     return float(value)
+
+
+def _positive_timeout(value) -> float:
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "WHISPER_MODEL_LOAD_TIMEOUT_SEC must be a positive number"
+        ) from None
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError(
+            "WHISPER_MODEL_LOAD_TIMEOUT_SEC must be a positive number"
+        )
+    return timeout

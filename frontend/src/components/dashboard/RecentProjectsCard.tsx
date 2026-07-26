@@ -14,8 +14,12 @@ export function RecentProjectsCard({ projects }: { projects: Project[] }) {
       </div>
       <div className="grid min-h-0 flex-1 grid-cols-4 gap-3">
         {projects.map((p) => (
-          <div key={p.id} className="flex min-w-0 flex-col overflow-hidden rounded-xl bg-raised/60">
-            <img src={p.thumbnailUrl} alt="" className="h-14 w-full shrink-0 object-cover" />
+          <Link to={`/episodes/${encodeURIComponent(p.id)}`} key={p.id} className="flex min-w-0 flex-col overflow-hidden rounded-xl bg-raised/60">
+            {p.thumbnailUrl ? (
+              <img src={p.thumbnailUrl} alt="" className="h-14 w-full shrink-0 object-cover" />
+            ) : (
+              <div className="h-14 w-full shrink-0 bg-warm/40" />
+            )}
             <div className="flex min-h-0 flex-1 flex-col gap-0.5 p-2">
               <p className="truncate text-xs font-medium">{p.title}</p>
               <p className="tnum text-[10px] text-muted-warm">
@@ -32,7 +36,7 @@ export function RecentProjectsCard({ projects }: { projects: Project[] }) {
                 <MoreVertical className="size-3.5 text-muted-warm" />
               </div>
             </div>
-          </div>
+          </Link>
         ))}
       </div>
     </Card>
