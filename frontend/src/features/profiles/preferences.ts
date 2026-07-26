@@ -7,7 +7,12 @@ export interface SubmissionPreferences {
 
 const DEFAULT_PREFERENCES: SubmissionPreferences = {
   providerProfileId: null,
-  summaryLanguage: "zh",
+  summaryLanguage: "zh-Hans",
+}
+
+/** Legacy generic "zh" predates the Simplified/Traditional split. */
+function migrateSummaryLanguage(language: string): string {
+  return language === "zh" ? "zh-Hans" : language
 }
 
 export function getSubmissionPreferences(): SubmissionPreferences {
@@ -24,7 +29,11 @@ export function getSubmissionPreferences(): SubmissionPreferences {
       typeof (value as { summaryLanguage: unknown }).summaryLanguage === "string" &&
       (value as { summaryLanguage: string }).summaryLanguage.length > 0
     ) {
-      return value as SubmissionPreferences
+      const stored = value as SubmissionPreferences
+      return {
+        providerProfileId: stored.providerProfileId,
+        summaryLanguage: migrateSummaryLanguage(stored.summaryLanguage),
+      }
     }
   } catch {
     // Invalid user storage falls back to safe defaults.

@@ -157,9 +157,20 @@ class AIProcessorTests(unittest.IsolatedAsyncioTestCase):
         system = runner.calls[0][1][0]["content"]
         user = runner.calls[0][1][1]["content"]
         self.assertIn("never return an empty chapters array", system)
-        self.assertIn("zh", system)
+        self.assertIn("Chinese", system)
         self.assertIn("Video title: My Video", user)
         self.assertIn("Video duration: 30 seconds", user)
+
+    async def test_language_codes_map_to_prompt_friendly_names(self):
+        from backend.v2.jobs.ai import _language_name
+
+        self.assertEqual(_language_name("zh"), "Chinese")
+        self.assertEqual(_language_name("zh-Hans"), "Simplified Chinese")
+        self.assertEqual(_language_name("zh-Hant"), "Traditional Chinese")
+        self.assertEqual(_language_name("zh-TW"), "Traditional Chinese")
+        self.assertEqual(_language_name("en"), "English")
+        self.assertEqual(_language_name("fr"), "fr")
+        self.assertEqual(_language_name(""), "")
 
     async def test_invalid_chapters_raise_sanitized_error(self):
         invalid_payloads = [

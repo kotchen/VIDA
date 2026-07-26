@@ -157,10 +157,11 @@ export function SubmissionForm({ initialFile }: { initialFile?: File | null }) {
             value={language}
             onChange={(event) => setLanguage(event.target.value)}
           >
-            <option value="zh">Chinese</option>
+            <option value="zh-Hans">简体中文</option>
+            <option value="zh-Hant">繁體中文</option>
             <option value="en">English</option>
-            <option value="ja">Japanese</option>
-            <option value="es">Spanish</option>
+            <option value="ja">日本語</option>
+            <option value="es">Español</option>
           </select>
         </label>
       </div>

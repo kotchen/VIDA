@@ -18,8 +18,8 @@
 
 每次开发都必须留下 devnote，包括功能开发、缺陷修复、重要重构、公开配置或运行方式变更。
 
-- 路径格式：`docs/devnote/YYYY-MM-MMDD/`，例如 2026 年 7 月 25 日使用
-  `docs/devnote/2026-07-0725/`。
+- 路径格式：`docs/devnote/YYYY/MM/MMDD/`，例如 2026 年 7 月 25 日使用
+  `docs/devnote/2026/07/0725/`。
 - 一个开发主题对应一个具有描述性的 Markdown 文件名，例如
   `vida-v2-frontend-integration.md`；不要使用 `README.md`、`note.md` 等泛化名称。
 - 同一天继续同一个开发主题时更新原文件；不同主题新建文件。
@@ -77,6 +77,15 @@ HF_HUB_DISABLE_XET=1
 HF_HUB_ETAG_TIMEOUT=10
 HF_HUB_DOWNLOAD_TIMEOUT=60
 ```
+
+平台页面（YouTube、Bilibili 等）的媒体与字幕抓取默认走内置固定 SSRF 通道直连。在平台页面
+直连不可达的网络（例如本机有系统代理）下，可以设置出口代理让平台抓取改走该代理：
+
+```dotenv
+V2_PLATFORM_EGRESS_PROXY=http://127.0.0.1:7897
+```
+
+不设置时保持默认直连行为；直连媒体 URL 下载始终走 SSRF 通道，不受该变量影响。
 
 `start.py` 不会自行读取 `.env`，启动前必须由 shell、IDE 或密钥管理器注入。不要把真实主密钥或
 Provider API Key 写入源码、命令参数、Git、devnote 或日志。`VIDA_PROFILE_MASTER_KEY` 必须与

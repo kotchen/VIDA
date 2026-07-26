@@ -133,21 +133,24 @@ class Transcriber:
         logger.info("Starting audio transcription")
 
         def materialize() -> StructuredTranscription:
+            transcribe_kwargs = {
+                "language": language,
+                "beam_size": 5,
+                "best_of": 5,
+                "temperature": [0.0, 0.2, 0.4],
+                "no_speech_threshold": 0.7,
+                "compression_ratio_threshold": 2.3,
+                "log_prob_threshold": -1.0,
+                "condition_on_previous_text": False,
+            }
             segments, info = self.model.transcribe(
                 audio_path,
-                language=language,
-                beam_size=5,
-                best_of=5,
-                temperature=[0.0, 0.2, 0.4],
                 vad_filter=True,
                 vad_parameters={
                     "min_silence_duration_ms": 900,
                     "speech_pad_ms": 300,
                 },
-                no_speech_threshold=0.7,
-                compression_ratio_threshold=2.3,
-                log_prob_threshold=-1.0,
-                condition_on_previous_text=False,
+                **transcribe_kwargs,
             )
             rows = tuple(
                 TranscriptSegment(
@@ -157,6 +160,23 @@ class Transcriber:
                 )
                 for segment in segments
             )
+            if not rows:
+                # Silero VAD can swallow an entire music-heavy or quiet track;
+                # never let it turn a playable audio into an empty transcript.
+                logger.warning(
+                    "VAD produced no segments; retrying without VAD filter"
+                )
+                segments, info = self.model.transcribe(
+                    audio_path, vad_filter=False, **transcribe_kwargs
+                )
+                rows = tuple(
+                    TranscriptSegment(
+                        _strict_timestamp(segment.start),
+                        _strict_timestamp(segment.end),
+                        segment.text.strip(),
+                    )
+                    for segment in segments
+                )
             return StructuredTranscription(
                 str(info.language), float(info.language_probability), rows
             )

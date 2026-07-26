@@ -28,6 +28,7 @@ class EpisodePipeline:
         source,
         transcriber,
         ai_factory,
+        subtitles=None,
         heartbeat_interval_sec: float = 5.0,
         now: Callable[[], str],
     ):
@@ -42,6 +43,7 @@ class EpisodePipeline:
         self._source = source
         self._transcriber = transcriber
         self._ai_factory = ai_factory
+        self._subtitles = subtitles
         self._heartbeat_interval = heartbeat_interval_sec
         self._now = now
 
@@ -87,10 +89,32 @@ class EpisodePipeline:
                     "Pipeline persistence failed"
                 ) from None
         try:
-            transcription = await self._stage(
-                job, 20, "Transcribing", cancel_check,
-                self._transcriber.transcribe_segments(str(prepared.media_path)),
-            )
+            transcription = None
+            if (
+                self._subtitles is not None
+                and episode.source_type == "url"
+                and episode.source_url
+            ):
+                try:
+                    transcription = await self._stage(
+                        job, 20, "Fetching platform subtitles", cancel_check,
+                        self._subtitles.fetch(
+                            episode.source_url,
+                            episode.summary_language,
+                            attempt / "subtitles",
+                            cancel_check,
+                        ),
+                    )
+                except (JobCanceled, asyncio.CancelledError):
+                    await _remove_attempt(attempt, attempt, self._data_dir)
+                    raise
+                except Exception:
+                    transcription = None
+            if transcription is None:
+                transcription = await self._stage(
+                    job, 20, "Transcribing", cancel_check,
+                    self._transcriber.transcribe_segments(str(prepared.media_path)),
+                )
             if not transcription.segments:
                 raise ValueError("empty transcription")
             validated_segments = _validate_segments(transcription.segments)

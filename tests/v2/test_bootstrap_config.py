@@ -98,7 +98,9 @@ class BootstrapYtDlpTests(unittest.TestCase):
         self.assertEqual(len(observed), 1)
         validator, kwargs = observed[0]
         self.assertIsInstance(validator, SecureDownloader)
-        self.assertEqual(kwargs, {"max_bytes": 5 * 1024**3})
+        self.assertEqual(
+            kwargs, {"max_bytes": 5 * 1024**3, "egress_proxy": None}
+        )
 
 
 if __name__ == "__main__":

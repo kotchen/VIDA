@@ -24,6 +24,7 @@ from .events import V2EventBroker
 from .jobs.models import JobExecutor
 from .jobs.ai import AIProcessor
 from .jobs.pipeline import EpisodePipeline
+from .jobs.subtitles import PlatformSubtitleFetcher
 from .jobs.source_ingest import (
     AsyncioProcessRunner,
     DownloadedMedia,
@@ -125,6 +126,7 @@ def _build_runtime(
         page_downloader = YtDlpDownloader(
             secure_downloader,
             max_bytes=settings.upload_max_bytes,
+            egress_proxy=settings.platform_egress_proxy,
         )
         source_ingestor = SourceIngestor(
             process_runner,
@@ -143,6 +145,10 @@ def _build_runtime(
             source=source_ingestor,
             transcriber=speech_transcriber,
             ai_factory=AIProcessor,
+            subtitles=PlatformSubtitleFetcher(
+                secure_downloader,
+                egress_proxy=settings.platform_egress_proxy,
+            ),
             now=_utc_now,
         )
         if preload_model:

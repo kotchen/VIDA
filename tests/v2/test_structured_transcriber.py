@@ -76,6 +76,42 @@ class StructuredTranscriberTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaisesRegex(Exception, "Transcription failed"):
                         await transcriber.transcribe_segments("audio.wav")
 
+    async def test_empty_vad_result_retries_without_vad_filter(self):
+        class VadAwareModel:
+            def __init__(self):
+                self.vad_flags = []
+
+            def transcribe(self, *args, **kwargs):
+                self.vad_flags.append(kwargs.get("vad_filter"))
+                if kwargs.get("vad_filter"):
+                    return iter([]), types.SimpleNamespace(
+                        language="en", language_probability=0.5
+                    )
+                return iter(
+                    [types.SimpleNamespace(start=0.0, end=2.0, text="recovered")]
+                ), types.SimpleNamespace(language="en", language_probability=0.8)
+
+        model = VadAwareModel()
+        transcriber = Transcriber()
+        transcriber.model = model
+        with patch("backend.transcriber.os.path.exists", return_value=True):
+            result = await transcriber.transcribe_segments("audio.wav")
+
+        self.assertEqual(model.vad_flags, [True, False])
+        self.assertEqual(
+            [(s.start_sec, s.end_sec, s.text) for s in result.segments],
+            [(0.0, 2.0, "recovered")],
+        )
+        self.assertEqual(result.language_probability, 0.8)
+
+    async def test_empty_result_without_vad_stays_empty(self):
+        transcriber = Transcriber()
+        transcriber.model = FakeModel([])
+        with patch("backend.transcriber.os.path.exists", return_value=True):
+            result = await transcriber.transcribe_segments("audio.wav")
+
+        self.assertEqual(result.segments, ())
+
 
 if __name__ == "__main__":
     unittest.main()

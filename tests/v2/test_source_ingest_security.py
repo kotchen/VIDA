@@ -249,6 +249,45 @@ class YtDlpAcquisitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(path, (directory / "media.m4a").resolve())
         self.assertTrue(proxy.entered and proxy.exited)
 
+    async def test_egress_proxy_bypasses_ssrf_tunnel(self):
+        directory = Path(tempfile.mkdtemp())
+        captured = {}
+
+        class Policy:
+            async def validate_url(self, url, cancel_check):
+                return None
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                captured.update(options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def extract_info(self, url, download):
+                (directory / "media.m4a").write_bytes(b"audio")
+                return {}
+
+        def forbidden_factory(cancel_check):
+            raise AssertionError("SSRF tunnel must not start in egress mode")
+
+        async def inline(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        path = await YtDlpDownloader(
+            Policy(),
+            proxy_factory=forbidden_factory,
+            youtube_dl_factory=FakeYoutubeDL,
+            thread_runner=inline,
+            egress_proxy="http://127.0.0.1:7897",
+        ).download("https://www.youtube.com/watch?v=x", directory, lambda: False)
+
+        self.assertEqual(captured["proxy"], "http://127.0.0.1:7897")
+        self.assertEqual(path, (directory / "media.m4a").resolve())
+
     async def test_supported_platforms_and_unknown_pages_are_separated(self):
         constructed = []
 

@@ -893,6 +893,7 @@ class YtDlpDownloader:
         proxy_factory=None,
         youtube_dl_factory=None,
         thread_runner=run_owned_to_thread,
+        egress_proxy: str | None = None,
     ):
         self._validator = page_validator
         self._max_bytes = max_bytes
@@ -902,6 +903,9 @@ class YtDlpDownloader:
         )
         self._youtube_dl_factory = youtube_dl_factory or yt_dlp.YoutubeDL
         self._thread_runner = thread_runner
+        # Opt-in upstream proxy (e.g. a local system proxy) for networks where
+        # platform pages are unreachable through the pinned direct tunnel.
+        self._egress_proxy = egress_proxy
 
     async def download(
         self, url: str, directory: Path, cancel_check: CancelCheck,
@@ -924,15 +928,25 @@ class YtDlpDownloader:
         target = Path(directory)
         await self._thread_runner(target.mkdir, parents=True, exist_ok=True)
         try:
-            async with self._proxy_factory(cancel_check) as proxy:
+            if self._egress_proxy is not None:
                 title = await self._thread_runner(
                     self._download_sync,
                     url,
                     target,
-                    proxy.proxy_url,
+                    self._egress_proxy,
                     cancel_check,
                     progress,
                 )
+            else:
+                async with self._proxy_factory(cancel_check) as proxy:
+                    title = await self._thread_runner(
+                        self._download_sync,
+                        url,
+                        target,
+                        proxy.proxy_url,
+                        cancel_check,
+                        progress,
+                    )
             path = await self._thread_runner(
                 self._validate_single_output, target
             )

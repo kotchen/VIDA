@@ -230,7 +230,18 @@ describe("SettingsPage", () => {
     localStorage.setItem("vida.v2.submissionPreferences", "{broken")
     expect(getSubmissionPreferences()).toEqual({
       providerProfileId: null,
+      summaryLanguage: "zh-Hans",
+    })
+  })
+
+  it("migrates the legacy generic zh preference to Simplified Chinese", () => {
+    setSubmissionPreferences({
+      providerProfileId: "profile-1",
       summaryLanguage: "zh",
+    })
+    expect(getSubmissionPreferences()).toEqual({
+      providerProfileId: "profile-1",
+      summaryLanguage: "zh-Hans",
     })
   })
 })

@@ -250,12 +250,19 @@ Content-Type: application/json
 {
   "sourceUrl": "https://example.com/media.mp3",
   "providerProfileId": "uuid",
-  "summaryLanguage": "zh",
+  "summaryLanguage": "zh-Hans",
   "title": "optional"
 }
 ```
 
 JSON body 最大 16 KiB；未知字段被拒绝。`sourceUrl` 必须是最长 2048 字符的 HTTP(S) URL。下载器拒绝凭据 URL、私网/回环/链路本地目标、DNS rebinding、非标准 Web 端口和不安全重定向。
+
+`summaryLanguage` 同时决定摘要/章节输出语言和平台字幕抓取偏好。前端当前提供
+`zh-Hans`（简体中文）、`zh-Hant`（繁體中文）、`en`、`ja`、`es`；历史上存入的 `zh`
+仍然合法，字幕偏好按简体中文优先、繁体中文兜底处理。平台页面（YouTube、Bilibili
+等）在转录阶段会先按该语言偏好尝试下载已有字幕轨道（人工字幕优先于自动字幕，简体
+中文不会匹配繁体轨道，反之亦然）；命中时跳过 Whisper 直接落库，未命中或抓取失败时
+自动回退到本地 Whisper 转录。两条路径产出的转录段结构一致，后续摘要与章节流程不变。
 
 省略 `title` 时初始标题为 URL 的 hostname；平台页面（YouTube、Bilibili、TikTok、SoundCloud）在来源采集阶段通过 yt-dlp 元数据解析出真实标题后，会在转录开始前替换该回退标题并用于后续摘要生成。用户显式提供的 `title` 永远不会被覆盖。`sourceUrl` 会在创建和详情响应中原样返回，客户端可用它为支持的来源渲染网络播放器。
 

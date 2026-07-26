@@ -101,6 +101,19 @@ class Transcriber:
         return StructuredTranscription("en", 0.9, tuple(rows))
 
 
+class Subtitles:
+    def __init__(self, result=None, error=None):
+        self.result = result
+        self.error = error
+        self.calls = []
+
+    async def fetch(self, url, language, directory, cancel_check):
+        self.calls.append((url, language))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
 class AI:
     def __init__(self, optimize_error=None, summary_error=None, chapter_error=None):
         self.optimize_error = optimize_error
@@ -170,7 +183,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
     def make_pipeline(
         self, ai, *, transcriber=None, heartbeat=5.0, episodes=None, chapters=None,
-        media=None, source=None,
+        media=None, source=None, subtitles=None,
     ):
         captured = []
 
@@ -188,6 +201,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             source=source or Source(),
             transcriber=transcriber or Transcriber(),
             ai_factory=ai_factory,
+            subtitles=subtitles,
             heartbeat_interval_sec=heartbeat,
             now=lambda: NOW,
         )
@@ -998,6 +1012,71 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             (self.data / "episodes" / "episode-1" / "attempts" / "job-1").exists()
         )
+
+    async def test_platform_subtitles_replace_whisper_for_url_episodes(self):
+        job = self.make_url_job("www.bilibili.com")
+        subtitle_segments = (
+            SimpleNamespace(start_sec=0.0, end_sec=2.0, text="你好"),
+            SimpleNamespace(start_sec=2.0, end_sec=4.0, text="世界"),
+        )
+        subtitles = Subtitles(
+            SimpleNamespace(
+                language="zh-Hans", automatic=False, segments=subtitle_segments
+            )
+        )
+
+        async def forbidden(*args, **kwargs):
+            raise AssertionError("whisper must not run when subtitles were fetched")
+
+        pipeline, _ = self.make_pipeline(
+            AI(),
+            transcriber=SimpleNamespace(transcribe_segments=forbidden),
+            subtitles=subtitles,
+        )
+        await pipeline.execute(job, lambda: False)
+
+        episode = self.episodes.get("episode-url")
+        self.assertEqual(episode.status, "completed")
+        self.assertEqual(episode.language, "zh-Hans")
+        self.assertEqual(
+            [(row.text, row.start_sec, row.end_sec)
+             for row in self.episodes.get_transcript("episode-url")],
+            [("你好", 0.0, 2.0), ("世界", 2.0, 4.0)],
+        )
+        self.assertEqual(
+            subtitles.calls, [("https://www.bilibili.com/video/x", "zh")]
+        )
+
+    async def test_missing_platform_subtitles_fall_back_to_whisper(self):
+        job = self.make_url_job("www.bilibili.com")
+        subtitles = Subtitles(None)
+        pipeline, _ = self.make_pipeline(AI(), subtitles=subtitles)
+        await pipeline.execute(job, lambda: False)
+
+        episode = self.episodes.get("episode-url")
+        self.assertEqual(episode.status, "completed")
+        self.assertEqual(episode.language, "en")
+        self.assertEqual(len(self.episodes.get_transcript("episode-url")), 2)
+
+    async def test_platform_subtitle_failure_falls_back_to_whisper(self):
+        job = self.make_url_job("www.bilibili.com")
+        subtitles = Subtitles(error=RuntimeError("subtitle service secret"))
+        pipeline, _ = self.make_pipeline(AI(), subtitles=subtitles)
+        await pipeline.execute(job, lambda: False)
+
+        episode = self.episodes.get("episode-url")
+        self.assertEqual(episode.status, "completed")
+        self.assertEqual(episode.language, "en")
+
+    async def test_upload_episodes_never_query_platform_subtitles(self):
+        subtitles = Subtitles(
+            SimpleNamespace(language="en", automatic=False, segments=())
+        )
+        pipeline, _ = self.make_pipeline(AI(), subtitles=subtitles)
+        await pipeline.execute(self.job, lambda: False)
+
+        self.assertEqual(subtitles.calls, [])
+        self.assertEqual(self.episodes.get("episode-1").status, "completed")
 
     async def test_empty_transcription_is_a_core_pipeline_error(self):
         pipeline, _ = self.make_pipeline(AI(), transcriber=Transcriber(segments=[]))

@@ -150,7 +150,10 @@ class AIProcessor:
             },
             {
                 "role": "user",
-                "content": f"Language: {target_language}\nTitle: {title}\n\n{transcript}",
+                "content": (
+                    f"Language: {_language_name(target_language)}\n"
+                    f"Title: {title}\n\n{transcript}"
+                ),
             },
         )
         payload = await self._request(messages)
@@ -202,7 +205,7 @@ class AIProcessor:
                     "chapter starts at 0; every startSec is smaller than the video "
                     "duration; create about one chapter per 3 to 8 minutes of video; "
                     "each title is a short descriptive phrase of at most 40 "
-                    f"characters written in {language or 'the transcript language'}; "
+                    f"characters written in {_language_name(language) or 'the transcript language'}; "
                     "never return an empty chapters array. Example for a 600 second "
                     'video: {"chapters": [{"startSec": 0, "title": "Opening '
                     'remarks"}, {"startSec": 245, "title": "Key argument"}, '
@@ -295,6 +298,26 @@ def _plain_text(value) -> str:
     if not text:
         raise ValueError
     return text
+
+
+_LANGUAGE_NAMES = {
+    "zh": "Chinese",
+    "zh-hans": "Simplified Chinese",
+    "zh-cn": "Simplified Chinese",
+    "zh-sg": "Simplified Chinese",
+    "zh-hant": "Traditional Chinese",
+    "zh-tw": "Traditional Chinese",
+    "zh-hk": "Traditional Chinese",
+    "en": "English",
+    "ja": "Japanese",
+    "es": "Spanish",
+}
+
+
+def _language_name(code: str) -> str:
+    """Map a submission language code to the name an LLM understands."""
+    normalized = (code or "").strip().lower()
+    return _LANGUAGE_NAMES.get(normalized, code or "")
 
 
 def _one_line_title(value) -> str:
