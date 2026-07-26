@@ -7,6 +7,13 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
+if __package__:
+    from .whisper_environment import configure_huggingface_environment
+else:
+    from whisper_environment import configure_huggingface_environment
+
+
+configure_huggingface_environment()
 from faster_whisper import WhisperModel
 
 
@@ -30,8 +37,18 @@ class StructuredTranscription:
 class Transcriber:
     """Transcribe audio with Faster-Whisper."""
 
-    def __init__(self, model_size: str = "base"):
-        self.model_size = model_size
+    def __init__(
+        self,
+        model_size: str | None = None,
+        model_load_timeout_sec: float | None = None,
+    ):
+        self.model_size = model_size or os.getenv("WHISPER_MODEL_SIZE", "base")
+        raw_timeout = (
+            model_load_timeout_sec
+            if model_load_timeout_sec is not None
+            else os.getenv("WHISPER_MODEL_LOAD_TIMEOUT_SEC", "300")
+        )
+        self.model_load_timeout_sec = _positive_timeout(raw_timeout)
         self.model = None
         self._model_lock = asyncio.Lock()
         self.last_detected_language = None
@@ -50,10 +67,23 @@ class Transcriber:
                     device="cpu",
                     compute_type="int8",
                 )
-            except Exception as exc:
+            except Exception:
                 logger.error("模型加载失败")
-                raise Exception(f"模型加载失败: {exc}") from None
+                raise RuntimeError("Whisper model initialization failed") from None
             logger.info("模型加载完成")
+
+    async def preload(self) -> None:
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(self._load_model()),
+                timeout=self.model_load_timeout_sec,
+            )
+        except TimeoutError:
+            logger.error("Whisper model initialization timed out")
+            raise RuntimeError("Whisper model initialization timed out") from None
+        except Exception:
+            logger.error("Whisper model initialization failed")
+            raise RuntimeError("Whisper model initialization failed") from None
 
     async def transcribe(self, audio_path: str, language: Optional[str] = None) -> str:
         """Return the exact legacy Markdown transcript format."""
@@ -168,3 +198,17 @@ def _strict_timestamp(value) -> float:
     if type(value) not in {int, float} or not math.isfinite(float(value)):
         raise ValueError("invalid transcript timestamp")
     return float(value)
+
+
+def _positive_timeout(value) -> float:
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "WHISPER_MODEL_LOAD_TIMEOUT_SEC must be a positive number"
+        ) from None
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError(
+            "WHISPER_MODEL_LOAD_TIMEOUT_SEC must be a positive number"
+        )
+    return timeout
