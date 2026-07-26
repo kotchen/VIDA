@@ -45,6 +45,8 @@
   `model.bin` 为 145,217,532 字节、无 `.incomplete` 残留，并成功完成 CPU/int8 模型构造。
 - 原卡住 Job 在处理恢复前已自行进入脱敏的失败终态，没有遗留 queued/processing Job；Episode
   保留，待新版本合并并完成 startup readiness 后通过既有 retry 接口重试。
+- 合并后安全重启验证了实际 readiness 顺序：Whisper 加载完成后才启动 v2 runtime 和 scheduler。
+  原 Episode 重试从 20% 推进到 65%、72%、85%，最终 100% `completed`，无错误码。
 
 ## 2. 学习与可沉淀经验
 
