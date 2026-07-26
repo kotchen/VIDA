@@ -51,7 +51,8 @@ app.add_middleware(
 # 获取项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent
 
-v2_runtime = install_v2(app, PROJECT_ROOT)
+transcriber = Transcriber()
+v2_runtime = install_v2(app, PROJECT_ROOT, transcriber=transcriber)
 
 # 挂载静态文件
 app.mount("/static", StaticFiles(directory=str(PROJECT_ROOT / "static")), name="static")
@@ -62,7 +63,6 @@ TEMP_DIR.mkdir(exist_ok=True)
 
 # 初始化处理器
 video_processor = VideoProcessor()
-transcriber = Transcriber()
 summarizer = Summarizer()
 translator = Translator()
 

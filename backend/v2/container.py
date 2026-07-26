@@ -54,6 +54,9 @@ class V2Runtime:
     media_service: MediaService | None = None
     provider_tester: ProviderTester | None = None
     provider_model_fetcher: ProviderModelFetcher | None = None
+    _readiness: Callable[[], Awaitable[None]] | None = field(
+        default=None, repr=False
+    )
     _initializer: Callable[[], "V2Runtime"] | None = field(default=None, repr=False)
 
     def initialize(self) -> None:
@@ -78,6 +81,8 @@ class V2Runtime:
             self.provider_tester = initialized.provider_tester
         if self.provider_model_fetcher is None:
             self.provider_model_fetcher = initialized.provider_model_fetcher
+        if self._readiness is None:
+            self._readiness = initialized._readiness
 
     def require_provider_profiles(self) -> ProviderProfileService:
         if self.provider_profile_service is None:
@@ -91,6 +96,8 @@ class V2Runtime:
 
     async def start(self) -> None:
         self.initialize()
+        if self._readiness is not None:
+            await self._readiness()
         self.log_startup_settings()
         if self.scheduler is None:
             raise RuntimeError("v2 runtime has no scheduler")

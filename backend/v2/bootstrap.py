@@ -43,12 +43,16 @@ from .services.provider_profiles import (
 )
 
 
-def install_v2(app: FastAPI, project_root: Path) -> V2Runtime:
+def install_v2(
+    app: FastAPI,
+    project_root: Path,
+    transcriber: Transcriber | None = None,
+) -> V2Runtime:
     root = Path(project_root)
     events = V2EventBroker()
     runtime = V2Runtime(
         events=events,
-        _initializer=lambda: _build_environment_runtime(root, events),
+        _initializer=lambda: _build_environment_runtime(root, events, transcriber),
     )
     runtime.install(app)
     return runtime
@@ -73,15 +77,24 @@ def build_test_runtime(
 
 
 def _build_environment_runtime(
-    project_root: Path, events: V2EventBroker | None = None
+    project_root: Path,
+    events: V2EventBroker | None = None,
+    transcriber: Transcriber | None = None,
 ) -> V2Runtime:
-    return _build_runtime(V2Settings.from_environ(os.environ, project_root), events=events)
+    return _build_runtime(
+        V2Settings.from_environ(os.environ, project_root),
+        events=events,
+        transcriber=transcriber,
+        preload_model=True,
+    )
 
 
 def _build_runtime(
     settings: V2Settings,
     executor: JobExecutor | None = None,
     events: V2EventBroker | None = None,
+    transcriber: Transcriber | None = None,
+    preload_model: bool = False,
 ) -> V2Runtime:
     event_broker = events or V2EventBroker()
     database = Database(settings.database_path)
@@ -103,6 +116,7 @@ def _build_runtime(
         event_broker.publish,
         media_service,
     )
+    readiness = None
     if executor is None:
         _disable_yt_dlp_plugins()
         process_runner = AsyncioProcessRunner()
@@ -117,6 +131,7 @@ def _build_runtime(
             data_dir=settings.data_dir,
             audio_poster=Path(__file__).resolve().parents[2] / "static" / "sipsip.png",
         )
+        speech_transcriber = transcriber or Transcriber()
         job_executor = EpisodePipeline(
             data_dir=settings.data_dir,
             profiles=service,
@@ -125,10 +140,12 @@ def _build_runtime(
             jobs=job_repository,
             media=media_service,
             source=source_ingestor,
-            transcriber=Transcriber(),
+            transcriber=speech_transcriber,
             ai_factory=AIProcessor,
             now=_utc_now,
         )
+        if preload_model:
+            readiness = speech_transcriber.preload
     else:
         job_executor = executor
     scheduler = Scheduler(
@@ -152,6 +169,7 @@ def _build_runtime(
         media_service=media_service,
         provider_tester=test_provider_connection,
         provider_model_fetcher=fetch_provider_models,
+        _readiness=readiness,
     )
 
 
