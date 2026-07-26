@@ -88,6 +88,10 @@ VIDA_PROFILE_MASTER_KEY=<首次生成且长期保持不变的值>
 V2_MAX_CONCURRENT_JOBS=2
 V2_UPLOAD_MAX_GB=5
 WHISPER_MODEL_SIZE=base
+WHISPER_MODEL_LOAD_TIMEOUT_SEC=300
+HF_HUB_DISABLE_XET=1
+HF_HUB_ETAG_TIMEOUT=10
+HF_HUB_DOWNLOAD_TIMEOUT=60
 ```
 
 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 是 1.x 服务端默认 Provider 配置；V2 Provider 凭据通过
@@ -110,6 +114,12 @@ python3 start.py --prod
 
 不要把真实主密钥或 Provider API Key 写入命令历史、日志或提交到 Git。丢失或随意轮换
 `VIDA_PROFILE_MASTER_KEY` 会导致已保存的 Provider 凭据无法解密。
+
+FastAPI startup 必须先下载并加载配置的 Whisper 模型，再启动 scheduler worker。默认 `base`
+模型首次下载约 145 MB；初始化失败或超过 `WHISPER_MODEL_LOAD_TIMEOUT_SEC` 时服务保持未就绪。
+默认使用 `HF_HUB_DISABLE_XET=1` 走普通 HTTPS，避免 Xet 原生传输在系统代理下无限等待；只有部署者
+验证当前网络兼容时才覆盖该值。生产环境应尽量持久化 Hugging Face cache，但不得把模型文件提交
+到 Git。
 
 ### Docker 安装
 

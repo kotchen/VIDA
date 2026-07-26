@@ -72,6 +72,10 @@ VIDA_PROFILE_MASTER_KEY=<生成并长期保存的值>
 V2_MAX_CONCURRENT_JOBS=2
 V2_UPLOAD_MAX_GB=5
 WHISPER_MODEL_SIZE=base
+WHISPER_MODEL_LOAD_TIMEOUT_SEC=300
+HF_HUB_DISABLE_XET=1
+HF_HUB_ETAG_TIMEOUT=10
+HF_HUB_DOWNLOAD_TIMEOUT=60
 ```
 
 `start.py` 不会自行读取 `.env`，启动前必须由 shell、IDE 或密钥管理器注入。不要把真实主密钥或
@@ -95,6 +99,13 @@ python start.py --prod
   `yt-dlp` 时会因找不到可执行文件而在 5% 进度失败。
 - 启动后可用 `command -v python` 和 `command -v yt-dlp` 检查两者是否都指向当前仓库的
   `venv/bin/`。
+- FastAPI 会在启动阶段下载并加载 `WHISPER_MODEL_SIZE` 对应的模型，成功后才启动 v2 scheduler
+  并对外就绪。默认 `base` 首次需要从 Hugging Face 下载约 145 MB，首次启动会明显更慢。
+- 默认禁用 Hugging Face Xet 并使用普通 HTTPS；除非部署者已经验证 Xet 与当前代理兼容，否则不要
+  覆盖 `HF_HUB_DISABLE_XET=1`。模型初始化失败或超过
+  `WHISPER_MODEL_LOAD_TIMEOUT_SEC` 时服务不会就绪，scheduler worker 也不会启动。
+- 生产部署应尽量持久化 Hugging Face cache，避免容器重建或服务迁移时重复下载模型；不要把模型
+  文件提交进 Git。
 - 后端端口：`8000`；
 - `--prod` 会关闭热重载，适合长任务和稳定 SSE 连接；
 - 本地需要调试 Python 热重载时可去掉 `--prod`；

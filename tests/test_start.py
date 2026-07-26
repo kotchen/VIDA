@@ -9,6 +9,50 @@ import start
 
 
 class StartupOptionsTests(unittest.TestCase):
+    def test_uvicorn_child_receives_huggingface_transport_defaults(self):
+        options = start.StartupOptions(True, 8000, 2, 5, "master-key")
+        with patch.dict(start.os.environ, {}, clear=False):
+            for name in (
+                "HF_HUB_DISABLE_XET",
+                "HF_HUB_ETAG_TIMEOUT",
+                "HF_HUB_DOWNLOAD_TIMEOUT",
+            ):
+                start.os.environ.pop(name, None)
+            with (
+                patch.object(start, "parse_startup_options", return_value=options),
+                patch.object(start, "configure_ffmpeg_path"),
+                patch.object(start, "check_dependencies", return_value=True),
+                patch.object(start, "check_ffmpeg", return_value=True),
+                patch.object(start, "setup_environment", return_value=True),
+                patch.object(start.os, "chdir"),
+                patch.object(start.subprocess, "run") as run,
+            ):
+                start.main()
+
+        child_environ = run.call_args.kwargs["env"]
+        self.assertEqual(child_environ["HF_HUB_DISABLE_XET"], "1")
+        self.assertEqual(child_environ["HF_HUB_ETAG_TIMEOUT"], "10")
+        self.assertEqual(child_environ["HF_HUB_DOWNLOAD_TIMEOUT"], "60")
+
+    def test_uvicorn_child_preserves_explicit_huggingface_timeout(self):
+        options = start.StartupOptions(True, 8000, 2, 5, "master-key")
+        with patch.dict(
+            start.os.environ, {"HF_HUB_DOWNLOAD_TIMEOUT": "120"}, clear=False
+        ):
+            with (
+                patch.object(start, "parse_startup_options", return_value=options),
+                patch.object(start, "configure_ffmpeg_path"),
+                patch.object(start, "check_dependencies", return_value=True),
+                patch.object(start, "check_ffmpeg", return_value=True),
+                patch.object(start, "setup_environment", return_value=True),
+                patch.object(start.os, "chdir"),
+                patch.object(start.subprocess, "run") as run,
+            ):
+                start.main()
+
+        child_environ = run.call_args.kwargs["env"]
+        self.assertEqual(child_environ["HF_HUB_DOWNLOAD_TIMEOUT"], "120")
+
     def test_uvicorn_access_log_is_disabled_to_avoid_query_secret_leaks(self):
         options = start.StartupOptions(False, 8000, 2, 5, "master-key")
         with (

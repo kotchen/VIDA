@@ -10,6 +10,11 @@ services:
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
       # 可选：Whisper模型大小
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-base}
+      # Startup readiness downloads and loads Whisper before workers start.
+      - WHISPER_MODEL_LOAD_TIMEOUT_SEC=${WHISPER_MODEL_LOAD_TIMEOUT_SEC:-300}
+      - HF_HUB_DISABLE_XET=${HF_HUB_DISABLE_XET:-1}
+      - HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT:-10}
+      - HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT:-60}
       # 可选：本地上传单文件大小上限（MB），与本地环境变量一致
       - UPLOAD_MAX_MB=${UPLOAD_MAX_MB:-200}
       # VIDA 2.0 startup configuration. VIDA_PROFILE_MASTER_KEY is required;

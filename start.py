@@ -10,6 +10,8 @@ import argparse
 from dataclasses import dataclass
 from pathlib import Path
 
+from backend.whisper_environment import configure_huggingface_environment
+
 try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:
@@ -149,6 +151,7 @@ def setup_environment():
 
 def main():
     """主函数"""
+    configure_huggingface_environment()
     # 检查是否使用生产模式（禁用热重载）
     options = parse_startup_options()
     production_mode = options.production_mode
