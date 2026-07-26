@@ -16,7 +16,7 @@ import yt_dlp
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 from urllib.parse import urljoin, urlsplit
 
 from ..domain import EpisodeRecord
@@ -97,6 +97,13 @@ class PreparedSource:
     media_content_type: str
     poster_path: Path
     poster_content_type: str
+    source_title: str | None = None
+
+
+@dataclass(frozen=True)
+class DownloadedMedia:
+    path: Path
+    title: str | None = None
 
 
 class ProcessRunner(Protocol):
@@ -115,6 +122,19 @@ class Downloader(Protocol):
         cancel_check: CancelCheck,
         progress: ProgressCallback | None = None,
     ) -> Awaitable[Path]: ...
+
+
+@runtime_checkable
+class MetadataDownloader(Protocol):
+    """Optional downloader extension that also reports the remote page title."""
+
+    def download_with_metadata(
+        self,
+        url: str,
+        directory: Path,
+        cancel_check: CancelCheck,
+        progress: ProgressCallback | None = None,
+    ) -> Awaitable[DownloadedMedia]: ...
 
 
 class Resolver(Protocol):
@@ -272,15 +292,23 @@ class SourceIngestor:
             raise SourceIngestError("Invalid attempt path")
         self._bounded_path(attempt, "attempt path")
         downloaded = episode.source_type == "url"
+        source_title: str | None = None
         try:
             _report(progress, 5)
             if downloaded:
                 _raise_if_canceled(cancel_check)
                 if not episode.source_url:
                     raise SourceIngestError("URL source is missing")
-                media = await self._downloader.download(
-                    episode.source_url, attempt / "source", cancel_check
-                )
+                if isinstance(self._downloader, MetadataDownloader):
+                    fetched = await self._downloader.download_with_metadata(
+                        episode.source_url, attempt / "source", cancel_check
+                    )
+                    media = fetched.path
+                    source_title = fetched.title
+                else:
+                    media = await self._downloader.download(
+                        episode.source_url, attempt / "source", cancel_check
+                    )
                 media = self._bounded_path(media, "download path")
             elif episode.source_type == "upload":
                 if not episode.source_path:
@@ -338,7 +366,8 @@ class SourceIngestor:
             _raise_if_canceled(cancel_check)
             _report(progress, 20)
             return PreparedSource(
-                media, metadata[0], metadata[1], metadata[3], poster, poster_type
+                media, metadata[0], metadata[1], metadata[3], poster, poster_type,
+                source_title,
             )
         except (JobCanceled, asyncio.CancelledError, SourceIngestError):
             await _remove_attempt(attempt, expected_attempt, self._data_dir)
@@ -878,6 +907,15 @@ class YtDlpDownloader:
         self, url: str, directory: Path, cancel_check: CancelCheck,
         progress: ProgressCallback | None = None,
     ) -> Path:
+        fetched = await self.download_with_metadata(
+            url, directory, cancel_check, progress
+        )
+        return fetched.path
+
+    async def download_with_metadata(
+        self, url: str, directory: Path, cancel_check: CancelCheck,
+        progress: ProgressCallback | None = None,
+    ) -> DownloadedMedia:
         parsed, _ = _validated_remote_url(url)
         host = parsed.hostname.lower().rstrip(".")
         if not any(host == allowed or host.endswith("." + allowed) for allowed in self._PLATFORM_HOSTS):
@@ -887,7 +925,7 @@ class YtDlpDownloader:
         await self._thread_runner(target.mkdir, parents=True, exist_ok=True)
         try:
             async with self._proxy_factory(cancel_check) as proxy:
-                await self._thread_runner(
+                title = await self._thread_runner(
                     self._download_sync,
                     url,
                     target,
@@ -895,9 +933,10 @@ class YtDlpDownloader:
                     cancel_check,
                     progress,
                 )
-            return await self._thread_runner(
+            path = await self._thread_runner(
                 self._validate_single_output, target
             )
+            return DownloadedMedia(path, title)
         except (JobCanceled, asyncio.CancelledError):
             await self._thread_runner(_remove_directory_contents, target)
             raise
@@ -912,7 +951,7 @@ class YtDlpDownloader:
         proxy_url: str,
         cancel_check: CancelCheck,
         progress: ProgressCallback | None,
-    ) -> None:
+    ) -> str | None:
         def progress_hook(state) -> None:
             if cancel_check():
                 raise JobCanceled
@@ -940,7 +979,8 @@ class YtDlpDownloader:
             "progress_hooks": [progress_hook],
         }
         with self._youtube_dl_factory(options) as downloader:
-            downloader.extract_info(url, download=True)
+            info = downloader.extract_info(url, download=True)
+        return _sanitize_title(info.get("title") if isinstance(info, dict) else None)
 
     def _validate_single_output(self, directory: Path) -> Path:
         root = directory.resolve()
@@ -972,6 +1012,20 @@ def _remove_directory_contents(directory: Path) -> None:
                 shutil.rmtree(child)
         except FileNotFoundError:
             pass
+
+
+_TITLE_MAX_LENGTH = 200
+_TITLE_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def _sanitize_title(value: object) -> str | None:
+    """Normalize an extractor-reported title into a safe Episode title."""
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(_TITLE_CONTROL_CHARS.sub(" ", value).split())
+    if not cleaned:
+        return None
+    return cleaned[:_TITLE_MAX_LENGTH].rstrip() or None
 
 
 def _validated_remote_url(url: str):

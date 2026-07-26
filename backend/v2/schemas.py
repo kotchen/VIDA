@@ -167,6 +167,7 @@ class EpisodeSubmissionResponse(ApiModel):
     id: str
     title: str
     source_type: str
+    source_url: str | None = None
     media_url: str | None = None
     poster_url: str | None = None
     duration_sec: float = 0

@@ -20,6 +20,7 @@ export interface Episode {
   id: string
   title: string
   sourceType: "upload" | "url"
+  sourceUrl: string | null
   mediaUrl: string | null
   posterUrl: string | null
   durationSec: number

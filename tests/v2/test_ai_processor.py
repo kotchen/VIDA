@@ -146,10 +146,26 @@ class AIProcessorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(row.source == "generated" for row in chapters))
         self.assertTrue(all(not row.bookmarked for row in chapters))
 
+    async def test_chapters_prompt_includes_duration_title_and_nonempty_rule(self):
+        runner = RecordingRunner([
+            json.dumps({"chapters": [{"startSec": 0, "title": "Opening"}]})
+        ])
+        await AIProcessor(CREDENTIALS, runner=runner).generate_chapters(
+            "episode-1", "transcript", 30.0, None, title="My Video", language="zh"
+        )
+
+        system = runner.calls[0][1][0]["content"]
+        user = runner.calls[0][1][1]["content"]
+        self.assertIn("never return an empty chapters array", system)
+        self.assertIn("zh", system)
+        self.assertIn("Video title: My Video", user)
+        self.assertIn("Video duration: 30 seconds", user)
+
     async def test_invalid_chapters_raise_sanitized_error(self):
         invalid_payloads = [
             "not-json",
             json.dumps({"wrong": []}),
+            json.dumps({"chapters": []}),
             {"chapters": [{"startSec": -1, "title": "Bad"}]},
             {"chapters": [
                 {"startSec": 5, "title": "Later"},
@@ -168,12 +184,6 @@ class AIProcessorTests(unittest.IsolatedAsyncioTestCase):
                         CREDENTIALS, runner=RecordingRunner([payload])
                     ).generate_chapters("episode-1", "text", 30.0, None)
                 self.assertNotIn(payload, str(caught.exception))
-
-    async def test_explicit_empty_chapters_are_valid(self):
-        rows = await AIProcessor(
-            CREDENTIALS, runner=RecordingRunner(['{"chapters": []}'])
-        ).generate_chapters("episode-1", "text", 30.0, None)
-        self.assertEqual(rows, [])
 
     async def test_provider_errors_and_timeouts_are_sanitized(self):
         for failure in (RuntimeError("secret-key upstream exploded"), asyncio.TimeoutError()):

@@ -26,6 +26,7 @@ from .jobs.ai import AIProcessor
 from .jobs.pipeline import EpisodePipeline
 from .jobs.source_ingest import (
     AsyncioProcessRunner,
+    DownloadedMedia,
     SecureDownloader,
     SourceIngestor,
     YtDlpDownloader,
@@ -184,14 +185,26 @@ class _RoutingDownloader:
         self._direct = direct
         self._page = page
 
-    async def download(self, url, directory, cancel_check, progress=None):
+    def _pick(self, url):
         host = (urlsplit(url).hostname or "").lower().rstrip(".")
         platform = any(
             host == allowed or host.endswith("." + allowed)
             for allowed in YtDlpDownloader._PLATFORM_HOSTS
         )
-        downloader = self._page if platform else self._direct
+        return (self._page if platform else self._direct), platform
+
+    async def download(self, url, directory, cancel_check, progress=None):
+        downloader, _ = self._pick(url)
         return await downloader.download(url, directory, cancel_check, progress)
+
+    async def download_with_metadata(self, url, directory, cancel_check, progress=None):
+        downloader, platform = self._pick(url)
+        if platform:
+            return await downloader.download_with_metadata(
+                url, directory, cancel_check, progress
+            )
+        path = await downloader.download(url, directory, cancel_check, progress)
+        return DownloadedMedia(path, None)
 
 
 def _utc_now() -> str:

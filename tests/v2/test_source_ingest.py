@@ -11,6 +11,7 @@ from backend.v2.domain import EpisodeRecord
 from backend.v2.jobs.models import JobCanceled
 from backend.v2.jobs.source_ingest import (
     AsyncioProcessRunner,
+    DownloadedMedia,
     ProcessResult,
     SourceIngestError,
     SourceIngestor,
@@ -111,6 +112,43 @@ class SourceIngestTests(unittest.IsolatedAsyncioTestCase):
             ).prepare(episode, self.attempt, lambda: False)
         self.assertEqual(downloader.calls[0][1], self.attempt / "source")
         self.assertFalse(self.attempt.exists())
+
+    async def test_url_metadata_title_is_propagated_to_prepared_source(self):
+        class MetadataFakeDownloader:
+            async def download_with_metadata(self, url, directory, cancel_check, progress=None):
+                target = Path(directory) / "download.mp4"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"download")
+                return DownloadedMedia(target, "Extracted Title")
+
+        runner = FakeRunner({
+            "format": {"duration": "12.5", "format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+            "streams": [{"codec_type": "video", "width": 1920, "height": 1080}],
+        })
+        episode = replace(
+            self.episode, source_type="url", source_path=None,
+            source_url="https://www.bilibili.com/video/x",
+        )
+        prepared = await SourceIngestor(
+            runner, MetadataFakeDownloader(), data_dir=self.data, audio_poster=self.asset
+        ).prepare(episode, self.attempt, lambda: False)
+
+        self.assertEqual(prepared.source_title, "Extracted Title")
+
+    async def test_plain_downloader_yields_no_source_title(self):
+        runner = FakeRunner({
+            "format": {"duration": "12.5", "format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+            "streams": [{"codec_type": "video", "width": 1920, "height": 1080}],
+        })
+        episode = replace(
+            self.episode, source_type="url", source_path=None,
+            source_url="https://media.example/a.mp4",
+        )
+        prepared = await SourceIngestor(
+            runner, FakeDownloader(), data_dir=self.data, audio_poster=self.asset
+        ).prepare(episode, self.attempt, lambda: False)
+
+        self.assertIsNone(prepared.source_title)
 
     async def test_invalid_probe_json_is_sanitized_and_attempt_is_cleaned(self):
         class InvalidRunner:

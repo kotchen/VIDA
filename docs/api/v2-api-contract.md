@@ -76,6 +76,7 @@ interface Episode {
   id: string
   title: string
   sourceType: 'upload' | 'url'
+  sourceUrl: string | null
   mediaUrl: string | null
   posterUrl: string | null
   durationSec: number
@@ -255,6 +256,8 @@ Content-Type: application/json
 ```
 
 JSON body 最大 16 KiB；未知字段被拒绝。`sourceUrl` 必须是最长 2048 字符的 HTTP(S) URL。下载器拒绝凭据 URL、私网/回环/链路本地目标、DNS rebinding、非标准 Web 端口和不安全重定向。
+
+省略 `title` 时初始标题为 URL 的 hostname；平台页面（YouTube、Bilibili、TikTok、SoundCloud）在来源采集阶段通过 yt-dlp 元数据解析出真实标题后，会在转录开始前替换该回退标题并用于后续摘要生成。用户显式提供的 `title` 永远不会被覆盖。`sourceUrl` 会在创建和详情响应中原样返回，客户端可用它为支持的来源渲染网络播放器。
 
 ### 上传提交
 

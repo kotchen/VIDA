@@ -104,9 +104,13 @@ class EpisodeSubmissionApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202, response.text)
         body = response.json()
         self.assertEqual(body["sourceType"], "url")
+        self.assertEqual(body["sourceUrl"], "https://example.com/video")
         self.assertEqual(body["status"], "queued")
         self.assertEqual(body["queuePosition"], 1)
         self.assertEqual(response.headers["Location"], f"/api/v2/episodes/{body['id']}")
+        fetched = self.client.get(f"/api/v2/episodes/{body['id']}")
+        self.assertEqual(fetched.status_code, 200, fetched.text)
+        self.assertEqual(fetched.json()["sourceUrl"], "https://example.com/video")
         with self.runtime.database.connect() as conn:
             row = conn.execute(
                 "SELECT source_url,source_path FROM episodes WHERE id=?", (body["id"],)

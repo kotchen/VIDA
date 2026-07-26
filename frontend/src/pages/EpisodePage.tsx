@@ -1,10 +1,9 @@
 import { useState } from "react"
 import { Link, useNavigate, useParams } from "react-router"
 
-import { ChaptersCard } from "@/components/dashboard/ChaptersCard"
 import { ExportCard } from "@/components/dashboard/ExportCard"
+import { InsightsCard } from "@/components/dashboard/InsightsCard"
 import { PlayerCard } from "@/components/dashboard/PlayerCard"
-import { SummaryCard } from "@/components/dashboard/SummaryCard"
 import { TranscriptCard } from "@/components/dashboard/TranscriptCard"
 import { EpisodeStatusPanel } from "@/features/episode/EpisodeStatusPanel"
 import { useEpisode } from "@/features/episode/useEpisode"
@@ -19,6 +18,9 @@ export function EpisodePage() {
   const state = useEpisode(id)
   const [chapterEditor, setChapterEditor] = useState<Chapter | "new" | null>(null)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [seek, setSeek] = useState<{ sec: number; nonce: number } | null>(null)
+  const seekTo = (sec: number) =>
+    setSeek((prev) => ({ sec, nonce: (prev?.nonce ?? 0) + 1 }))
 
   if (state.notFound) {
     return (
@@ -72,32 +74,35 @@ export function EpisodePage() {
       />
       {episode.status === "completed" ? (
         <div className="grid gap-5 lg:grid-cols-2">
-          <PlayerCard episode={episode} />
-          <SummaryCard
+          <PlayerCard episode={episode} seek={seek} />
+          <InsightsCard
             summary={state.summary}
-            loading={state.contentLoading}
-            onRegenerate={() => void state.regenerateSummary()}
+            summaryLoading={state.contentLoading}
+            onRegenerateSummary={() => void state.regenerateSummary()}
             regenerating={state.operation !== null}
-          />
-          <TranscriptCard segments={state.transcript} />
-          <ChaptersCard
             chapters={state.chapters}
-            onCreate={() => setChapterEditor("new")}
-            onEdit={setChapterEditor}
-            onDelete={(chapter) => void state.deleteChapter(chapter.id)}
-            onBookmark={(chapter) => void state.toggleBookmark(chapter)}
+            onCreateChapter={() => setChapterEditor("new")}
+            onEditChapter={setChapterEditor}
+            onDeleteChapter={(chapter) => void state.deleteChapter(chapter.id)}
+            onBookmarkChapter={(chapter) => void state.toggleBookmark(chapter)}
+            onSeekChapter={seekTo}
           />
-          <div>
+          <div className="lg:col-span-2">
+            <TranscriptCard segments={state.transcript} className="h-[26rem]" onSeek={seekTo} />
+          </div>
+          <div className="flex flex-wrap items-stretch gap-4 lg:col-span-2">
             <ExportCard episodeId={episode.id} />
-            <Button
-              disabled={state.operation !== null}
-              onClick={() => void state.regenerateChapters()}
-            >
-              Regenerate chapters
-            </Button>
-            <Button variant="destructive" onClick={() => setDeleteOpen(true)}>
-              Delete Episode
-            </Button>
+            <div className="flex items-center gap-3">
+              <Button
+                disabled={state.operation !== null}
+                onClick={() => void state.regenerateChapters()}
+              >
+                Regenerate chapters
+              </Button>
+              <Button variant="destructive" onClick={() => setDeleteOpen(true)}>
+                Delete Episode
+              </Button>
+            </div>
           </div>
         </div>
       ) : null}

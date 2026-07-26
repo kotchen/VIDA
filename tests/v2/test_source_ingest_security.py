@@ -311,6 +311,101 @@ class YtDlpAcquisitionTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(len(constructed), 4)
 
+    async def test_download_with_metadata_returns_sanitized_extractor_title(self):
+        directory = Path(tempfile.mkdtemp())
+
+        class Policy:
+            async def validate_url(self, url, cancel_check):
+                return None
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                self.params = options
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def extract_info(self, url, download):
+                (directory / "media.m4a").write_bytes(b"audio")
+                return {"title": "  Line One\nLine\x00 Two  "}
+
+        class Proxy:
+            proxy_url = "http://user:password@127.0.0.1:32123"
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+        async def inline(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        fetched = await YtDlpDownloader(
+            Policy(),
+            proxy_factory=lambda cancel_check: Proxy(),
+            youtube_dl_factory=FakeYoutubeDL,
+            thread_runner=inline,
+        ).download_with_metadata(
+            "https://www.bilibili.com/video/x", directory, lambda: False
+        )
+
+        self.assertEqual(fetched.path, (directory / "media.m4a").resolve())
+        self.assertEqual(fetched.title, "Line One Line Two")
+
+    async def test_download_with_metadata_tolerates_missing_or_overlong_title(self):
+        class Policy:
+            async def validate_url(self, url, cancel_check):
+                return None
+
+        class Proxy:
+            proxy_url = "http://user:password@127.0.0.1:32123"
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+        async def inline(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        for info, expected in (
+            ({}, None),
+            ({"title": 42}, None),
+            ({"title": "   "}, None),
+            ({"title": "x" * 300}, "x" * 200),
+        ):
+            with self.subTest(info=info):
+                directory = Path(tempfile.mkdtemp())
+
+                class FakeYoutubeDL:
+                    def __init__(self, options):
+                        self.params = options
+
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *args):
+                        return None
+
+                    def extract_info(self, url, download):
+                        (directory / "media.m4a").write_bytes(b"audio")
+                        return info
+
+                fetched = await YtDlpDownloader(
+                    Policy(),
+                    proxy_factory=lambda cancel_check: Proxy(),
+                    youtube_dl_factory=FakeYoutubeDL,
+                    thread_runner=inline,
+                ).download_with_metadata(
+                    "https://www.bilibili.com/video/x", directory, lambda: False
+                )
+                self.assertEqual(fetched.title, expected)
+
     async def test_cancel_from_progress_hook_propagates_and_cleans_output(self):
         directory = Path(tempfile.mkdtemp())
 

@@ -30,6 +30,7 @@ function episode(status: Episode["status"]): Episode {
     id: "episode-1",
     title: "Lifecycle Episode",
     sourceType: "upload",
+    sourceUrl: null,
     mediaUrl: status === "completed" ? "/api/v2/media" : null,
     posterUrl: null,
     durationSec: 120,
@@ -115,6 +116,8 @@ describe("EpisodePage", () => {
     )
     expect(await screen.findByText("Hello")).toBeInTheDocument()
     expect(screen.getByText("Summary content")).toBeInTheDocument()
+    expect(screen.queryByText("Opening")).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole("tab", { name: "Chapters" }))
     expect(screen.getByText("Opening")).toBeInTheDocument()
     expect(screen.getByText("Export")).toBeInTheDocument()
     expect(screen.getByText(/summary warnings/i)).toBeInTheDocument()

@@ -364,6 +364,7 @@ def _response(submission: EpisodeSubmission) -> EpisodeSubmissionResponse:
         id=episode.id,
         title=episode.title,
         source_type=episode.source_type,
+        source_url=episode.source_url,
         media_url=None,
         poster_url=None,
         duration_sec=episode.duration_sec or 0,
@@ -382,6 +383,7 @@ def _response(submission: EpisodeSubmission) -> EpisodeSubmissionResponse:
 def _episode_response(episode, queue_position: int | None) -> EpisodeResponse:
     return EpisodeResponse(
         id=episode.id, title=episode.title, source_type=episode.source_type,
+        source_url=episode.source_url,
         media_url=(None if episode.media_path is None else f"/api/v2/episodes/{episode.id}/media"),
         poster_url=(None if episode.poster_path is None else f"/api/v2/episodes/{episode.id}/poster"),
         duration_sec=episode.duration_sec or 0, resolution=episode.resolution,

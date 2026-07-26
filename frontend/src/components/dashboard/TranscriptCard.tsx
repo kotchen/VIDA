@@ -3,9 +3,18 @@ import { Card } from "@/components/ui/card"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import type { TranscriptSegment } from "@/api/types"
 import { formatTimestamp } from "@/lib/format"
+import { cn } from "@/lib/utils"
 import { useMemo, useState } from "react"
 
-export function TranscriptCard({ segments }: { segments: TranscriptSegment[] }) {
+export function TranscriptCard({
+  segments,
+  className,
+  onSeek,
+}: {
+  segments: TranscriptSegment[]
+  className?: string
+  onSeek?: (sec: number) => void
+}) {
   const [query, setQuery] = useState("")
   const filtered = useMemo(() => {
     const value = query.trim().toLowerCase()
@@ -16,7 +25,7 @@ export function TranscriptCard({ segments }: { segments: TranscriptSegment[] }) 
       : segments
   }, [query, segments])
   return (
-    <Card className="card-glow flex h-full flex-col gap-3 rounded-2xl border-warm/60 bg-card p-4">
+    <Card className={cn("card-glow flex h-full flex-col gap-3 rounded-2xl border-warm/60 bg-card p-4", className)}>
       <div className="flex items-center justify-between gap-3">
         <h2 className="shrink-0 text-base font-semibold text-gold">Transcript</h2>
         <div className="flex items-center gap-2">
@@ -39,7 +48,18 @@ export function TranscriptCard({ segments }: { segments: TranscriptSegment[] }) 
         <ol className="flex flex-col gap-1 pr-3">
           {filtered.map((seg, i) => (
             <li key={seg.id} className={`flex gap-3 rounded-lg px-2 py-1.5 ${i === 0 ? "bg-copper-500/15" : ""}`}>
-              <span className="tnum w-20 shrink-0 pt-0.5 text-xs text-copper-300">{formatTimestamp(seg.startSec)}</span>
+              {onSeek ? (
+                <button
+                  type="button"
+                  aria-label={`Seek to ${formatTimestamp(seg.startSec)}`}
+                  onClick={() => onSeek(seg.startSec)}
+                  className="tnum w-20 shrink-0 cursor-pointer pt-0.5 text-left text-xs text-copper-300 underline-offset-2 transition-colors hover:text-gold hover:underline"
+                >
+                  {formatTimestamp(seg.startSec)}
+                </button>
+              ) : (
+                <span className="tnum w-20 shrink-0 pt-0.5 text-xs text-copper-300">{formatTimestamp(seg.startSec)}</span>
+              )}
               <p className="text-sm leading-relaxed">
                 <span className="font-semibold text-cream">{seg.speaker}: </span>
                 <span className="text-cream/80">{seg.text}</span>

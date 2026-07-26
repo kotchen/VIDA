@@ -98,6 +98,18 @@ class EpisodeRepository:
                 ],
             )
 
+    def set_title(self, episode_id: str, title: str, updated_at: str) -> None:
+        """Replace an Episode title, e.g. with extractor metadata from ingest."""
+        if not 1 <= len(title.strip()) <= 200:
+            raise ValueError("episode title is invalid")
+        with self._database.transaction(immediate=True) as conn:
+            changed = conn.execute(
+                "UPDATE episodes SET title=?, updated_at=? WHERE id=?",
+                (title.strip(), updated_at, episode_id),
+            ).rowcount
+            if changed != 1:
+                raise KeyError(episode_id)
+
     def commit_core_output(
         self,
         episode_id: str,

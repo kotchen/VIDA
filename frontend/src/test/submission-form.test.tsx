@@ -35,6 +35,7 @@ const episode: Episode = {
   id: "episode-1",
   title: "Episode",
   sourceType: "url",
+  sourceUrl: "https://example.com/video",
   mediaUrl: null,
   posterUrl: null,
   durationSec: 0,

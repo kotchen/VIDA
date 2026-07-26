@@ -47,13 +47,18 @@ class Profiles:
 
 
 class Source:
+    def __init__(self, source_title=None):
+        self.source_title = source_title
+
     async def prepare(self, episode, attempt_dir, cancel_check, progress=None):
         attempt_dir.mkdir(parents=True, exist_ok=True)
         media = attempt_dir / "media.mp3"
         poster = attempt_dir / "poster.png"
         media.write_bytes(b"media")
         poster.write_bytes(b"poster")
-        return PreparedSource(media, 30.0, None, "audio/mpeg", poster, "image/png")
+        return PreparedSource(
+            media, 30.0, None, "audio/mpeg", poster, "image/png", self.source_title
+        )
 
 
 class Media:
@@ -112,12 +117,24 @@ class AI:
             raise self.summary_error
         return SummaryRecord(episode_id, "Summary", 1, 2, 91, "VIDA")
 
-    async def generate_chapters(self, episode_id, transcript, duration, poster):
+    async def generate_chapters(
+        self, episode_id, transcript, duration, poster, title="", language=""
+    ):
         if self.chapter_error:
             raise self.chapter_error
         return [ChapterRecord(
             "chapter-1", episode_id, 0, "Opening", duration, poster, False, "generated"
         )]
+
+
+class TitleRecordingAI(AI):
+    def __init__(self):
+        super().__init__()
+        self.titles = []
+
+    async def summarize(self, episode_id, transcript, language, title):
+        self.titles.append(title)
+        return await super().summarize(episode_id, transcript, language, title)
 
 
 class PipelineTests(unittest.IsolatedAsyncioTestCase):
@@ -136,6 +153,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         )
         self.credentials = replace_credentials(profile.id, profile.active_revision_id)
         self.profiles = Profiles(self.credentials)
+        self.revision_id = profile.active_revision_id
+        self.profile_id = profile.id
         self.episode = self.episodes.create(EpisodeRecord(
             "episode-1", "Title", "upload", "episodes/episode-1/source/a.mp3",
             None, "audio/mpeg", None, None, None, None, None, None, "queued",
@@ -151,7 +170,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
     def make_pipeline(
         self, ai, *, transcriber=None, heartbeat=5.0, episodes=None, chapters=None,
-        media=None,
+        media=None, source=None,
     ):
         captured = []
 
@@ -166,13 +185,68 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             chapters=chapters or self.chapters,
             jobs=self.jobs,
             media=media or Media(),
-            source=Source(),
+            source=source or Source(),
             transcriber=transcriber or Transcriber(),
             ai_factory=ai_factory,
             heartbeat_interval_sec=heartbeat,
             now=lambda: NOW,
         )
         return pipeline, captured
+
+    def make_url_job(self, title: str, *, episode_id="episode-url", job_id="job-url"):
+        self.episodes.create(EpisodeRecord(
+            episode_id, title, "url", None, "https://www.bilibili.com/video/x",
+            None, None, None, None, None, None, None, "queued",
+            None, "zh", 0, "Queued", "[]", None, None, None, self.profile_id,
+            NOW, NOW, None,
+        ))
+        self.jobs.enqueue(JobRecord(
+            job_id, episode_id, "process_episode", 1, "queued", self.revision_id,
+            NOW, None, None, None, None, None, 0, "Queued", None, None,
+        ))
+        return self.jobs.claim_next("worker-1", NOW)
+
+    async def test_extractor_title_replaces_url_hostname_fallback(self):
+        job = self.make_url_job("www.bilibili.com")
+        ai = TitleRecordingAI()
+        pipeline, _ = self.make_pipeline(ai, source=Source("Real Video Title"))
+        await pipeline.execute(job, lambda: False)
+
+        episode = self.episodes.get("episode-url")
+        self.assertEqual(episode.title, "Real Video Title")
+        self.assertEqual(ai.titles, ["Real Video Title"])
+        self.assertEqual(episode.status, "completed")
+
+    async def test_extractor_title_is_persisted_before_transcription_finishes(self):
+        job = self.make_url_job("www.bilibili.com")
+        gate = asyncio.Event()
+        pipeline, _ = self.make_pipeline(
+            TitleRecordingAI(),
+            transcriber=Transcriber(gate=gate),
+            source=Source("Real Video Title"),
+        )
+        task = asyncio.create_task(pipeline.execute(job, lambda: False))
+        for _ in range(200):
+            if self.jobs.get_required("job-url").progress >= 20:
+                break
+            await asyncio.sleep(0.01)
+
+        episode = self.episodes.get("episode-url")
+        self.assertEqual(episode.title, "Real Video Title")
+        self.assertEqual(self.jobs.get_required("job-url").progress, 20)
+        gate.set()
+        await task
+        self.assertEqual(self.episodes.get("episode-url").status, "completed")
+
+    async def test_user_supplied_title_survives_extractor_metadata(self):
+        job = self.make_url_job("My custom title")
+        ai = TitleRecordingAI()
+        pipeline, _ = self.make_pipeline(ai, source=Source("Real Video Title"))
+        await pipeline.execute(job, lambda: False)
+
+        episode = self.episodes.get("episode-url")
+        self.assertEqual(episode.title, "My custom title")
+        self.assertEqual(ai.titles, ["My custom title"])
 
     async def test_optional_ai_failures_complete_with_sanitized_warnings(self):
         pipeline, captured = self.make_pipeline(AI(
@@ -801,14 +875,16 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             async def generate_chapters(
-                inner_self, episode_id, transcript, duration, poster
+                inner_self, episode_id, transcript, duration, poster,
+                title="", language="",
             ):
                 if target == 85:
                     await gate.wait()
                     if child_fails:
                         raise RuntimeError("chapter child detail")
                 return await super().generate_chapters(
-                    episode_id, transcript, duration, poster
+                    episode_id, transcript, duration, poster,
+                    title=title, language=language,
                 )
 
         self.jobs.update_progress = update_progress
@@ -865,9 +941,13 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         processor = AIProcessor(self.credentials, runner=Runner())
 
         class MalformedChapterAI(AI):
-            async def generate_chapters(inner_self, episode_id, transcript, duration, poster):
+            async def generate_chapters(
+                inner_self, episode_id, transcript, duration, poster,
+                title="", language="",
+            ):
                 return await processor.generate_chapters(
-                    episode_id, transcript, duration, poster
+                    episode_id, transcript, duration, poster,
+                    title=title, language=language,
                 )
 
         pipeline, _ = self.make_pipeline(MalformedChapterAI())
@@ -876,7 +956,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.chapters.list("episode-1"), [old])
         self.assertEqual([w.stage for w in self.episodes.get("episode-1").warnings], ["chapters"])
 
-    async def test_explicit_empty_chapters_replace_previous_generated(self):
+    async def test_empty_chapters_keep_previous_generated_and_warn(self):
         old = ChapterRecord(
             "old-chapter", "episode-1", 0, "Old chapter", 30, None, False, "generated"
         )
@@ -889,16 +969,22 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         processor = AIProcessor(self.credentials, runner=Runner())
 
         class EmptyChapterAI(AI):
-            async def generate_chapters(inner_self, episode_id, transcript, duration, poster):
+            async def generate_chapters(
+                inner_self, episode_id, transcript, duration, poster,
+                title="", language="",
+            ):
                 return await processor.generate_chapters(
-                    episode_id, transcript, duration, poster
+                    episode_id, transcript, duration, poster,
+                    title=title, language=language,
                 )
 
         pipeline, _ = self.make_pipeline(EmptyChapterAI())
         await pipeline.execute(self.job, lambda: False)
 
-        self.assertEqual(self.chapters.list("episode-1"), [])
-        self.assertEqual(self.episodes.get("episode-1").warnings, [])
+        self.assertEqual(self.chapters.list("episode-1"), [old])
+        self.assertEqual(
+            [w.stage for w in self.episodes.get("episode-1").warnings], ["chapters"]
+        )
 
     async def test_transcription_failure_is_a_core_pipeline_error(self):
         pipeline, _ = self.make_pipeline(
